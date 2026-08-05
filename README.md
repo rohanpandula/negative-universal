@@ -110,3 +110,32 @@ The early evidence from the Coolscan 5000 (which uses an RGB LED strip + tri-lin
 ## License
 
 MIT
+
+## Latest findings (2026-08-04)
+
+### ICE was not the dominant residual
+
+The owner sent two more rolls with ICE disabled — Superia 800 and Portra 400.
+Result: Portra 400 with ICE off scores NCC 0.940, same as Portra 160 with
+ICE on at 0.936. The residual is **not** dominated by dust removal.
+
+The remaining gap is per-film spectral response (Superia 800 fits at 0.89 vs
+Portra's 0.94) and the absence of the LS-600's `SpecialPcb` per-film tables,
+which the Noritsu uses to adjust its color per film stock. The generic
+`CommonCalcPara.Dat` curve gets us most of the way; the per-film tables
+would close the rest.
+
+### Per-stock profiles
+
+The noritsu-tool now ships per-stock calibration profiles fitted from real
+LS-600 raw/TIFF pairs. Select with `--stock portra160` (or `portra400`,
+`superia800`).
+
+### What we need next
+
+1. **Any paired scan** — same frame on two different devices. The calibration
+   framework is proven; we just need the data.
+2. **SpecialPcb per-film tables** — the actual film-specific adjustments from
+   the LS-600 engine. These are in the `NEGA_*.dat` files we already recovered
+   the format for; they just need to be decoded and applied.
+3. **Monochrome + RGB light test** — prove the tier-1 scanning rig concept.
