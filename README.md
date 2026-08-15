@@ -1,141 +1,216 @@
 # Negative Universal
 
-**One density-space inversion to rule every scanner. Calibrated per device.**
+**A calibrated density-space pipeline for film scanners and camera-scanning
+rigs.**
 
-This repo connects three reverse-engineering projects — Nikon Coolscan, Noritsu
-LS-600, and Hasselblad FlexColor — to answer one question:
+This repository connects four reverse-engineering efforts—Noritsu LS-600,
+Nikon Coolscan, Hasselblad FlexColor, and Fujifilm Frontier SP-500—to answer a
+practical question:
 
-> Can a single C-41 inversion pipeline, calibrated per device, reproduce the
-> color of any scanner or DSLR scanning rig?
+> How much of C-41 inversion can be shared while the scanner, film stock, and
+> individual frame remain independently calibrated?
 
-The answer so far: **yes, and at ~94–99% accuracy.**
+The current answer is encouraging but narrower than “one LUT fixes every
+scanner.” Density-space inversion can be shared. Acquisition calibration,
+stock response, and scene correction must remain explicit and testable.
 
-## Why this exists
+## Working model
 
-Every film scanner and DSLR scanning rig has a different spectral response —
-different CCD/CMOS color filters, different light source, different optics. The
-same negative looks different on every device. For decades the solution has been
-to treat each scanner as a sealed box and build per-device color profiles.
+A C-41 negative is measured as transmittance and converted to optical density:
 
-But the math of C-41 inversion doesn't change. A negative is complementary dyes
-under an orange mask, period. The physics is:
-1. Measure transmittance per channel
-2. Convert to density: D = -log10(T)
-3. Remove the orange mask (Dmin)
-4. Normalize by density range
-5. Apply a tone curve
-
-Steps 2–5 are scanner-agnostic. Only the mapping from your device's raw RGB
-to linear transmittance (step 1) needs calibration. That's what this repo
-provides: a single calibration framework that takes a paired scan (same frame
-on your device + a reference Noritsu/Frontier lab scan) and fits a per-channel
-LUT that makes your device render like the reference.
-
-## What's already built
-
-| Project | Accuracy | What it does |
-|---|---|---|
-| **noritsu-tool** | ~94% NCC on LS-600 raw | Density inversion + Noritsu tone curves from actual DLL tables |
-| **cool-colors** | 99.1% of Nikon Coolscan color | Recovered Nikon Scan's full color pipeline (Nikon-specific) |
-| **flexcolor-tool** | engine math recovered | Hasselblad FlexColor LUTs, gradation curves, neg-gamma |
-| **digital-fauxice** | byte-for-byte exact | Nikon's Digital ICE reimplemented from scratch |
-| **ScanStudio** | full app | Modern replacement for Nikon Scan that runs today |
-
-## The big idea: calibrate once, render anything
-
-```
-Your device raw (DSLR / Coolscan / Plustek / Epson / whatever)
-        │
-        ▼
-   Linearize (device-specific calibration — the one-time fit)
-        │
-        ▼
-   Density inversion (universal — same math every time)
-        │
-        ▼
-   Tone curve (Noritsu / Frontier / Nikon / FlexColor / custom)
-        │
-        ▼
-   Positive output
+```text
+density = -log10(transmittance)
 ```
 
-The device-specific part (linearization + channel mapping) is a one-time
-calibration. After that, the pipeline is universal — you pick which "look"
-you want (Noritsu, Frontier, Nikon Scan, etc.) and the tone curve comes from
-the actual recovered engine data.
+The useful separation is:
 
-## The RGB light question
+| Layer | Corrects | Lifetime |
+| --- | --- | --- |
+| Device calibration | Camera offset, linearity, defects, light, optics, and carrier | Until the physical configuration drifts or changes |
+| Film profile | Repeatable stock and process behavior | Selected per stock or roll |
+| Frame correction | Scene cast and exposure variation | Recomputed per frame |
 
-DSLR scanning traditionally uses RGB LED panels (like the Raleno or Kaiser)
-that flash red, green, and blue in sequence — capturing three monochrome frames
-that combine into a color image. The spectral output of these lights is
-different from a scanner's fluorescent/LED lamp, which means the R/G/B
-channel ratios hitting the film are different.
+The complete target path is:
 
-The calibration framework handles this automatically: if you capture a
-reference frame with both your RGB-light rig and a Noritsu scanner, the
-calibration LUT absorbs the spectral difference. You get the Noritsu look from
-your RGB light.
+```text
+sequential monochrome R/G/B captures
+  -> dark, defect, linearity, flat-field, and registration calibration
+  -> calibrated scanner-relative transmittance
+  -> measured clear-film base + film-stock profile
+  -> density inversion
+  -> optional per-frame density and gray-balance correction
+  -> output tone and color rendering
+```
 
-But there's a subtler question: **can a single white-LED or RGB-simultaneous
-capture (one shot through a Bayer filter) produce the same color fidelity as a
-scanner's tri-linear CCD?** The answer depends on:
-- Whether the Bayer CFA's color separation is sufficient for C-41 dye clouds
-- Whether the light source's spectrum covers the film dyes evenly
-- Whether the calibration LUT can map the narrower color space
+Changing the output look must never change the preserved calibrated source
+triplet.
 
-The early evidence from the Coolscan 5000 (which uses an RGB LED strip + tri-linear CCD) suggests yes. The LS-600 uses a different lamp and CCD, and we got NCC 0.937 after calibration. DSLR + RGB panel should be achievable with similar or better accuracy.
+## Target hardware
 
-## Research roadmap
+The primary experiment is deliberately not a Bayer-camera scan:
 
-- [x] Recover Noritsu LS-600 pipeline (tables, tone curves, density inversion)
-- [x] Validate against real LS-600 raw + TIFF pairs (NCC 0.937, 8 frames Portra 160)
-- [x] Recover Nikon Coolscan color pipeline (cool-colors, 99.1%)
-- [x] Recover FlexColor engine math (profiles, LUTs, gradation)
-- [x] Build calibrate.py — fits per-channel LUT from any paired scan
-- [ ] Cross-scanner calibration: Coolscan → Noritsu look (needs paired frame)
-- [ ] DSLR + RGB light calibration rig protocol
-- [ ] Unified CLI: `negative-universal calibrate --ref ref.tif --device device.tif -o profile.npz`
-- [ ] Per-film-stock calibration profiles (Portra 400, Gold 200, Ektar 100, ECN-2)
-- [ ] Web-based comparison gallery (upload a neg, see it rendered in Noritsu/Frontier/Nikon styles)
+- one computer-controlled monochrome camera;
+- stationary film;
+- narrow-band red, green, and blue lights exposed one at a time;
+- computer control of camera exposure and each light's power.
 
-## Repos
+Each output channel is a full monochrome sensor frame measured under one light.
+Light power and shutter time are acquisition controls used for signal-to-noise
+and headroom. They are not unrecorded white-balance controls.
 
-- [github.com/rohanpandula/noritsu-tool](https://github.com/rohanpandula/noritsu-tool) — Noritsu LS-600 pipeline
-- [github.com/rohanpandula/cool-colors](https://github.com/rohanpandula/cool-colors) — Nikon Coolscan color science
-- [github.com/rohanpandula/flexcolor-tool](https://github.com/rohanpandula/flexcolor-tool) — Hasselblad FlexColor engine
-- [github.com/rohanpandula/digital-fauxice](https://github.com/rohanpandula/digital-fauxice) — Digital ICE reimplementation
-- [github.com/rohanpandula/ScanStudio](https://github.com/rohanpandula/ScanStudio) — Modern Coolscan software
+See [RGB light scope](docs/RGB-LIGHT-SCOPE.md) for the calibration protocol,
+the Frontier comparison, and the boundary expected from a hardware driver.
+
+## Runnable scaffold
+
+The initial Python scaffold captures and preserves `R -> G -> B` triplets
+through one external rig command, then applies matched dark/flat normalization:
+
+```text
+T = clamp((film - dark) / (flat - dark), 0, 1)
+```
+
+It intentionally starts with binary PGM (`P5`) input and output. PGM preserves
+8- or 16-bit monochrome samples without adding a RAW/TIFF dependency before the
+real camera contract is known. Samples are linear numeric codes, not
+display-ready grayscale; a generic image viewer may apply an inappropriate
+display transfer curve.
+
+Install locally:
+
+```sh
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -e .
+```
+
+Create `rig.json`:
+
+```json
+{
+  "_meta": {
+    "configuration_id": "camera-light-lens-carrier-v1",
+    "camera": "replace-with-camera-id",
+    "gain": "replace-with-fixed-gain",
+    "light_source": "replace-with-light-id",
+    "lens_carrier": "replace-with-optical-configuration"
+  },
+  "R": {"power": 0.70, "exposure_us": 10000},
+  "G": {"power": 0.55, "exposure_us": 12000},
+  "B": {"power": 0.80, "exposure_us": 15000}
+}
+```
+
+Capture matched datasets:
+
+```sh
+negative-universal capture --kind dark --settings rig.json \
+  --rig ./capture-one --output scan/dark
+negative-universal capture --kind flat --settings rig.json \
+  --rig ./capture-one --output scan/flat
+negative-universal capture --kind film --settings rig.json \
+  --rig ./capture-one --output scan/film
+```
+
+Normalize without overwriting the source captures:
+
+```sh
+negative-universal normalize --film scan/film --dark scan/dark \
+  --flat scan/flat --output scan/normalized
+```
+
+The external `capture-one` command is the only hardware seam. It receives one
+channel, normalized light power, exposure time, capture kind, and output path.
+It must also implement an idempotent `capture-one off` command. The controller
+calls `off` before the sequence and after every exposure, and terminates a
+capture that exceeds the configurable timeout. The adapter must still turn the
+light off in its own cleanup path; real hardware also needs a normally-off
+output or watchdog because software cannot recover from power or process loss.
+Vendor-specific adapters come after the actual hardware APIs are known.
+
+Manifest power and exposure fields are explicitly **commanded** settings. They
+must not be described as measured light dose or actual shutter timing until a
+driver returns that feedback.
+
+Run the tests with only the Python standard library:
+
+```sh
+PYTHONPATH=src python3 -m unittest discover -s tests -v
+```
+
+## What the research projects contribute
+
+| Project | Current result | Contribution |
+| --- | --- | --- |
+| **negative-universal** | capture/calibration scaffold | Device-independent experiment boundary |
+| **noritsu-tool** | about 0.94 NCC on validated LS-600 pairs | Density inversion, tone curves, and stock experiments |
+| **cool-colors** | 99.1% agreement in its validated Nikon path | Recovered Coolscan color pipeline |
+| **flexcolor-tool** | engine math recovered | LUTs, gradation curves, and negative gamma |
+| **frontier-sp500-research** | legacy behavior statically characterized | Device/stock/frame separation and learned gray balance |
+| **digital-fauxice** | byte-for-byte validated path | Independent Nikon Digital ICE work |
+| **ScanStudio** | working application | Modern Nikon scanning application |
+
+These percentages describe narrow, project-specific validation sets. They are
+not evidence that a new light/camera pair will reach the same result.
+
+## Frontier lessons
+
+The legacy SP-500 confirms three separate responsibilities:
+
+1. **Scanner correction** runs with no film. It calibrates LED currents, dark
+   response, defective pixels, bright/flat response, carrier, and optics.
+2. **Film Channel** is a named stock preset selected manually or by DX code. It
+   stores base C/M/Y balance and under/over/super-over slope adjustments.
+3. **Color Correction** analyzes each frame. The negative-film path uses a
+   learned gray-statistics model and produces red/blue offsets with green as
+   reference; it is not Kelvin and does not retune the LEDs.
+
+The independent evidence ledger is in
+[frontier-sp500-research](https://git.roflix.club/rohan/frontier-sp500-research).
+No Fujifilm binaries, tables, or decompiler output are copied here.
+
+## Roadmap
+
+- [x] Recover and validate narrow Noritsu, Nikon, and FlexColor paths.
+- [x] Recover the SP-500 separation of scanner, film-channel, and frame
+      correction.
+- [x] Scaffold sequential PGM capture, manifests, integrity hashes, and
+      dark/flat normalization.
+- [ ] Implement the first real camera/light `capture-one` adapter.
+- [ ] Measure dark, flat, linearity, drift, LED spectrum/power, and R/G/B
+      registration on the physical rig.
+- [ ] Add RAW/TIFF interchange after real camera files define the requirement.
+- [ ] Collect paired reference scans covering multiple frames, stocks, and
+      exposure ranges, with hold-out validation.
+- [ ] Add versioned stock profiles and measured clear-roll base removal.
+- [ ] Train an independent, auditable per-frame estimator from owned data.
+- [ ] Compare Noritsu, Frontier, Nikon, FlexColor, and custom render stages.
+
+One paired frame can bootstrap an experiment; it cannot establish a universal
+profile. Narrow-band measurements can lose spectral information, and a LUT
+cannot reconstruct information the camera/light combination never measured.
+
+## Related repositories
+
+- [noritsu-tool](https://github.com/rohanpandula/noritsu-tool)
+- [cool-colors](https://github.com/rohanpandula/cool-colors)
+- [flexcolor-tool](https://github.com/rohanpandula/flexcolor-tool)
+- [frontier-sp500-research](https://git.roflix.club/rohan/frontier-sp500-research)
+- [digital-fauxice](https://github.com/rohanpandula/digital-fauxice)
+- [ScanStudio](https://github.com/rohanpandula/ScanStudio)
+
+## Latest validated stock findings
+
+Tests with ICE disabled indicate that the largest Noritsu residual is not dust
+removal. Portra 400 without ICE measured about the same NCC as Portra 160 with
+ICE, while Superia 800 fit less closely. That supports explicit per-stock
+profiles and validation across stock and exposure range rather than treating
+one paired frame as a permanent device calibration.
+
+The related Noritsu work has experimental per-stock profiles for Portra 160,
+Portra 400, and Superia 800. Those results are inputs to this research, not
+profiles shipped by this repository.
 
 ## License
 
 MIT
-
-## Latest findings (2026-08-04)
-
-### ICE was not the dominant residual
-
-The owner sent two more rolls with ICE disabled — Superia 800 and Portra 400.
-Result: Portra 400 with ICE off scores NCC 0.940, same as Portra 160 with
-ICE on at 0.936. The residual is **not** dominated by dust removal.
-
-The remaining gap is per-film spectral response (Superia 800 fits at 0.89 vs
-Portra's 0.94) and the absence of the LS-600's `SpecialPcb` per-film tables,
-which the Noritsu uses to adjust its color per film stock. The generic
-`CommonCalcPara.Dat` curve gets us most of the way; the per-film tables
-would close the rest.
-
-### Per-stock profiles
-
-The noritsu-tool now ships per-stock calibration profiles fitted from real
-LS-600 raw/TIFF pairs. Select with `--stock portra160` (or `portra400`,
-`superia800`).
-
-### What we need next
-
-1. **Any paired scan** — same frame on two different devices. The calibration
-   framework is proven; we just need the data.
-2. **SpecialPcb per-film tables** — the actual film-specific adjustments from
-   the LS-600 engine. These are in the `NEGA_*.dat` files we already recovered
-   the format for; they just need to be decoded and applied.
-3. **Monochrome + RGB light test** — prove the tier-1 scanning rig concept.

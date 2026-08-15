@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "negative-universal"
+version = "0.1.0"
+description = "Calibrated sequential RGB film-scanning experiments"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+
+[project.scripts]
+negative-universal = "negative_universal.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
