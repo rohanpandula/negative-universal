@@ -33,7 +33,7 @@ The useful separation is:
 The complete target path is:
 
 ```text
-sequential monochrome R/G/B captures
+sequential R/G/B illumination captures (mono plane or raw CFA mosaic)
   -> dark, defect, linearity, flat-field, and registration calibration
   -> calibrated scanner-relative transmittance
   -> measured clear-film base + film-stock profile
@@ -47,16 +47,29 @@ triplet.
 
 ## Target hardware
 
-The primary experiment is deliberately not a Bayer-camera scan:
+The calibration core accepts externally prepared PGM data from two sensor
+classes behind the same capture boundary:
 
-- one computer-controlled monochrome camera;
-- stationary film;
-- narrow-band red, green, and blue lights exposed one at a time;
-- computer control of camera exposure and each light's power.
+- a computer-controlled monochrome camera, where every R/G/B illumination
+  exposure is a full monochrome sensor frame;
+- a Bayer camera such as a Fujifilm GFX100 II or Nikon Zf, where every exposure
+  is preserved as an undemosaiced raw CFA mosaic.
 
-Each output channel is a full monochrome sensor frame measured under one light.
-Light power and shutter time are acquisition controls used for signal-to-noise
-and headroom. They are not unrecorded white-balance controls.
+Native RAF/NEF ingestion and the camera-specific `capture-one` adapter are not
+implemented yet. “Bayer support” currently means recording and cross-checking
+the declared CFA phase while normalizing an adapter-produced mosaic PGM.
+
+The film remains stationary while narrow-band red, green, and blue lights are
+exposed one at a time. `R.pgm`, `G.pgm`, and `B.pgm` name the illumination
+exposure, not Bayer photosite classes. Light power and shutter time are
+acquisition controls used for signal-to-noise and headroom; they are not
+unrecorded white-balance controls.
+
+Relative to an otherwise comparable monochrome sensor, a Bayer CFA reduces
+spatial sampling and photon efficiency. Its red, two green, and blue site
+classes must be calibrated independently, and weak off-band sites may not be
+useful. Camera JPEG, white balance, demosaicing, auto exposure, rotation, and
+lens correction must stay out of the measurement path.
 
 See [RGB light scope](docs/RGB-LIGHT-SCOPE.md) for the calibration protocol,
 the Frontier comparison, and the boundary expected from a hardware driver.
@@ -71,10 +84,10 @@ T = clamp((film - dark) / (flat - dark), 0, 1)
 ```
 
 It intentionally starts with binary PGM (`P5`) input and output. PGM preserves
-8- or 16-bit monochrome samples without adding a RAW/TIFF dependency before the
-real camera contract is known. Samples are linear numeric codes, not
-display-ready grayscale; a generic image viewer may apply an inappropriate
-display transfer curve.
+one plane of 8- or 16-bit samples, including an undemosaiced Bayer mosaic,
+without adding a native RAW/TIFF dependency to the calibration core. Samples
+must be linear numeric codes, not display-ready grayscale; a generic image
+viewer may apply an inappropriate display transfer curve.
 
 Install locally:
 
@@ -91,6 +104,7 @@ Create `rig.json`:
   "_meta": {
     "configuration_id": "camera-light-lens-carrier-v1",
     "camera": "replace-with-camera-id",
+    "sensor_layout": "mono",
     "gain": "replace-with-fixed-gain",
     "light_source": "replace-with-light-id",
     "lens_carrier": "replace-with-optical-configuration"
@@ -100,6 +114,12 @@ Create `rig.json`:
   "B": {"power": 0.80, "exposure_us": 15000}
 }
 ```
+
+Use `mono`, `rggb`, `bggr`, `grbg`, or `gbrg` for `sensor_layout`. A Bayer
+pattern is relative to the top-left sample in the stored PGM, after any RAW
+crop or orientation operation. Film, dark, and flat captures must keep the
+same dimensions, crop, orientation, gain, code range, and CFA phase. The
+capture and normalized manifests record and cross-check this declared value.
 
 Capture matched datasets:
 
@@ -127,6 +147,37 @@ capture that exceeds the configurable timeout. The adapter must still turn the
 light off in its own cleanup path; real hardware also needs a normally-off
 output or watchdog because software cannot recover from power or process loss.
 Vendor-specific adapters come after the actual hardware APIs are known.
+
+### Scanlight and tethered cameras
+
+The reviewed [Scanlight firmware](https://github.com/jackw01/scanlight/tree/8f749d95cc3794c87452394a47f814afd2270adc/automation)
+uses USB CDC serial at 115200 baud. Its current set-color packet is
+`FE 00 06 R G B 00 00 00`; all-off is nine bytes ending in six zeros. A rig
+adapter must allow only the selected RGB byte to be nonzero, map normalized
+power to the nearest `0..255` command code, keep white/IR/save at zero, wait for
+the light to settle, and send all-off in `finally`. Set-color has no
+acknowledgement, and the command value is PWM—not measured optical power.
+
+The existing [TriRGB `scanlightctl`](https://github.com/rohanpandula/TriRGB/tree/7ec5bdd8dfc5729f272601208bfc9b9b64e69ce2/phase1/scanlightctl)
+is a source-reviewed protocol building block already installed on the
+development Mac; it is not yet the fail-safe `capture-one` adapter. That
+adapter must add firmware/hardware probing before enable, deterministic write
+drain and settle timing, internal `finally: off`, and the parent cleanup. The
+Scanlight firmware can retain its last output after host failure, so unattended
+use still needs a normally-off hardware enable/watchdog and independent
+thermal cutoff.
+
+Both named cameras have candidate computer-capture paths, none integrated or
+hardware-tested by this repository yet. Fujifilm documents
+[GFX100 II tethering](https://fujifilm-dsc.com/en/manual/gfx100ii/connections/tethere/index.html),
+and Nikon lists the Zf in
+[NX Tether](https://downloadcenter.nikonimglib.com/en/download/sw/276.html).
+The current
+[libgphoto2 support list](https://gphoto.sourceforge.io/proj/libgphoto2/support.php)
+also reports capture and configuration support for both. The first adapter
+should use native RAF/NEF, lock manual camera state, and use a pinned decoder
+validated to preserve linear mosaic codes, crop, CFA phase, and black/white
+metadata. It must never feed the core a rendered JPEG.
 
 Manifest power and exposure fields are explicitly **commanded** settings. They
 must not be described as measured light dose or actual shutter timing until a
@@ -176,10 +227,15 @@ No Fujifilm binaries, tables, or decompiler output are copied here.
       correction.
 - [x] Scaffold sequential PGM capture, manifests, integrity hashes, and
       dark/flat normalization.
-- [ ] Implement the first real camera/light `capture-one` adapter.
+- [x] Record and cross-check the declared mono/Bayer CFA layout through capture
+      and normalization.
+- [x] Map the current Scanlight firmware protocol to the `capture-one` seam.
+- [ ] Implement and hardware-test the first GFX100 II or Nikon Zf
+      `capture-one` adapter.
 - [ ] Measure dark, flat, linearity, drift, LED spectrum/power, and R/G/B
       registration on the physical rig.
-- [ ] Add RAW/TIFF interchange after real camera files define the requirement.
+- [ ] Add native RAF/NEF-to-mosaic interchange after real camera files define
+      the decoder and metadata contract.
 - [ ] Collect paired reference scans covering multiple frames, stocks, and
       exposure ranges, with hold-out validation.
 - [ ] Add versioned stock profiles and measured clear-roll base removal.
@@ -198,6 +254,8 @@ cannot reconstruct information the camera/light combination never measured.
 - [frontier-sp500-research](https://git.roflix.club/rohan/frontier-sp500-research)
 - [digital-fauxice](https://github.com/rohanpandula/digital-fauxice)
 - [ScanStudio](https://github.com/rohanpandula/ScanStudio)
+- [TriRGB](https://github.com/rohanpandula/TriRGB)
+- [Scanlight](https://github.com/jackw01/scanlight)
 
 ## Latest validated stock findings
 

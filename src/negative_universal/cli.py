@@ -1,4 +1,4 @@
-"""Capture and normalize sequential monochrome R/G/B frames."""
+"""Capture and normalize sequential R/G/B raw sensor frames."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from typing import Any, Iterator, Sequence
 
 
 CHANNELS = ("R", "G", "B")
+SENSOR_LAYOUTS = frozenset({"mono", "rggb", "bggr", "grbg", "gbrg"})
 MANIFEST_NAME = "manifest.json"
 DEFAULT_CAPTURE_TIMEOUT_SECONDS = 60.0
 
@@ -48,6 +49,15 @@ class PgmImage:
             raise NegativeUniversalError("PGM pixel count does not match dimensions")
         if any(pixel > self.max_value for pixel in self.pixels):
             raise NegativeUniversalError("PGM sample exceeds its declared max value")
+
+
+def _sensor_layout(value: Any, source: str) -> str:
+    if not isinstance(value, str) or value.lower() not in SENSOR_LAYOUTS:
+        allowed = ", ".join(sorted(SENSOR_LAYOUTS))
+        raise NegativeUniversalError(
+            f"{source} sensor_layout must be one of: {allowed}"
+        )
+    return value.lower()
 
 
 def _read_header_token(source: Any) -> bytes:
@@ -148,9 +158,13 @@ def load_settings(
     metadata = payload.get("_meta", {})
     if not isinstance(metadata, dict):
         raise NegativeUniversalError("settings _meta must be a JSON object")
+    metadata = dict(metadata)
     configuration_id = metadata.get("configuration_id")
     if not isinstance(configuration_id, str) or not configuration_id.strip():
         raise NegativeUniversalError("settings _meta.configuration_id is required")
+    metadata["sensor_layout"] = _sensor_layout(
+        metadata.get("sensor_layout", "mono"), "settings _meta"
+    )
 
     settings: dict[str, ChannelSettings] = {}
     for channel in CHANNELS:
@@ -340,9 +354,14 @@ def _load_manifest(directory: Path, expected_kind: str) -> dict[str, Any]:
     rig_metadata = payload.get("rig_metadata")
     if not isinstance(rig_metadata, dict):
         raise NegativeUniversalError(f"invalid rig metadata in {path}")
+    rig_metadata = dict(rig_metadata)
     configuration_id = rig_metadata.get("configuration_id")
     if not isinstance(configuration_id, str) or not configuration_id.strip():
         raise NegativeUniversalError(f"missing configuration ID in {path}")
+    rig_metadata["sensor_layout"] = _sensor_layout(
+        rig_metadata.get("sensor_layout", "mono"), str(path)
+    )
+    payload["rig_metadata"] = rig_metadata
     frames = payload.get("frames")
     if not isinstance(frames, dict) or set(frames) != set(CHANNELS):
         raise NegativeUniversalError(f"{path} must describe R, G, and B frames")
@@ -422,6 +441,15 @@ def _validate_capture_settings(
         raise NegativeUniversalError(
             "film, dark, and flat configuration IDs do not match"
         )
+    sensor_layouts = {
+        film["rig_metadata"]["sensor_layout"],
+        dark["rig_metadata"]["sensor_layout"],
+        flat["rig_metadata"]["sensor_layout"],
+    }
+    if len(sensor_layouts) != 1:
+        raise NegativeUniversalError(
+            "film, dark, and flat sensor layouts do not match"
+        )
     rig_paths = {film.get("rig"), dark.get("rig"), flat.get("rig")}
     if None in rig_paths or len(rig_paths) != 1:
         raise NegativeUniversalError("film, dark, and flat rig adapters do not match")
@@ -447,6 +475,7 @@ def _normalize_images(
     film_images: dict[str, PgmImage],
     dark_images: dict[str, PgmImage],
     flat_images: dict[str, PgmImage],
+    sensor_layout: str,
     output: Path,
 ) -> None:
     normalized_images: dict[str, PgmImage] = {}
@@ -511,6 +540,7 @@ def _normalize_images(
         "kind": "normalized_transmittance",
         "created_at": datetime.now(UTC).isoformat(),
         "channel_order": list(CHANNELS),
+        "sensor_layout": sensor_layout,
         "formula": "clamp((film-dark)/(flat-dark), 0, 1)",
         "output_max_value": 65535,
         "sources": {
@@ -550,6 +580,7 @@ def normalize_triplets(*, film: Path, dark: Path, flat: Path, output: Path) -> N
             film_images=film_images,
             dark_images=dark_images,
             flat_images=flat_images,
+            sensor_layout=film_manifest["rig_metadata"]["sensor_layout"],
             output=staging,
         )
 

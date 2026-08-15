@@ -114,12 +114,27 @@ Path(args.output).write_bytes(b'P5\\n2 1\\n255\\n' + bytes([values[args.kind]] *
         )
         return output
 
-    def _replace_frame(self, directory: Path, channel: str, pixels: list[int]) -> None:
+    def _replace_frame(
+        self,
+        directory: Path,
+        channel: str,
+        pixels: list[int],
+        *,
+        width: int = 2,
+        max_value: int = 255,
+    ) -> None:
         frame_path = directory / f"{channel}.pgm"
-        write_pgm(frame_path, PgmImage(2, 1, 255, array("H", pixels)))
+        height, remainder = divmod(len(pixels), width)
+        self.assertEqual(remainder, 0)
+        image = PgmImage(width, height, max_value, array("H", pixels))
+        write_pgm(frame_path, image)
         manifest_path = directory / "manifest.json"
         manifest = json.loads(manifest_path.read_text())
-        manifest["frames"][channel]["sha256"] = sha256_file(frame_path)
+        record = manifest["frames"][channel]
+        record["width"] = image.width
+        record["height"] = image.height
+        record["max_value"] = image.max_value
+        record["sha256"] = sha256_file(frame_path)
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     def test_capture_and_normalize(self) -> None:
@@ -155,6 +170,86 @@ Path(args.output).write_bytes(b'P5\\n2 1\\n255\\n' + bytes([values[args.kind]] *
         manifest = json.loads((normalized / "manifest.json").read_text())
         self.assertEqual(manifest["frames"]["R"]["clipped_low"], 1)
         self.assertEqual(manifest["frames"]["R"]["clipped_high"], 1)
+
+    def test_bayer_layout_and_phase_survive_normalization(self) -> None:
+        settings = json.loads(self.settings.read_text())
+        settings["_meta"]["sensor_layout"] = "RGGB"
+        self.settings.write_text(json.dumps(settings), encoding="utf-8")
+        dark = self._capture("dark")
+        flat = self._capture("flat")
+        film = self._capture("film")
+
+        for channel in ("R", "G", "B"):
+            self._replace_frame(
+                dark, channel, [10, 10, 10, 10], max_value=65535
+            )
+            self._replace_frame(
+                flat, channel, [110, 110, 110, 110], max_value=65535
+            )
+            self._replace_frame(
+                film, channel, [20, 35, 60, 85], max_value=65535
+            )
+
+        normalized = self.root / "normalized-bayer"
+        normalize_triplets(film=film, dark=dark, flat=flat, output=normalized)
+
+        capture_manifest = json.loads((film / "manifest.json").read_text())
+        normalized_manifest = json.loads((normalized / "manifest.json").read_text())
+        self.assertEqual(capture_manifest["rig_metadata"]["sensor_layout"], "rggb")
+        self.assertEqual(normalized_manifest["sensor_layout"], "rggb")
+        for channel in ("R", "G", "B"):
+            image = read_pgm(normalized / f"{channel}.pgm")
+            self.assertEqual((image.width, image.height), (2, 2))
+            self.assertEqual(list(image.pixels), [6554, 16384, 32768, 49151])
+
+    def test_missing_sensor_layout_defaults_to_mono(self) -> None:
+        dark = self._capture("dark")
+        flat = self._capture("flat")
+        film = self._capture("film")
+        manifest = json.loads((film / "manifest.json").read_text())
+        self.assertEqual(manifest["rig_metadata"]["sensor_layout"], "mono")
+
+        for directory in (dark, flat, film):
+            manifest_path = directory / "manifest.json"
+            legacy_manifest = json.loads(manifest_path.read_text())
+            legacy_manifest["rig_metadata"].pop("sensor_layout")
+            manifest_path.write_text(json.dumps(legacy_manifest), encoding="utf-8")
+
+        normalized = self.root / "normalized-legacy"
+        normalize_triplets(film=film, dark=dark, flat=flat, output=normalized)
+        normalized_manifest = json.loads((normalized / "manifest.json").read_text())
+        self.assertEqual(normalized_manifest["sensor_layout"], "mono")
+
+    def test_rejects_invalid_or_mismatched_sensor_layout(self) -> None:
+        settings = json.loads(self.settings.read_text())
+        settings["_meta"]["sensor_layout"] = "xtrans"
+        self.settings.write_text(json.dumps(settings), encoding="utf-8")
+        with self.assertRaisesRegex(NegativeUniversalError, "sensor_layout"):
+            self._capture("film")
+
+        settings["_meta"]["sensor_layout"] = None
+        self.settings.write_text(json.dumps(settings), encoding="utf-8")
+        with self.assertRaisesRegex(NegativeUniversalError, "sensor_layout"):
+            self._capture("film")
+
+        settings["_meta"]["sensor_layout"] = "rggb"
+        self.settings.write_text(json.dumps(settings), encoding="utf-8")
+        dark = self._capture("dark")
+        flat = self._capture("flat")
+        film = self._capture("film")
+        flat_manifest_path = flat / "manifest.json"
+        flat_manifest = json.loads(flat_manifest_path.read_text())
+        flat_manifest["rig_metadata"]["sensor_layout"] = "bggr"
+        flat_manifest_path.write_text(json.dumps(flat_manifest), encoding="utf-8")
+        with self.assertRaisesRegex(
+            NegativeUniversalError, "sensor layouts do not match"
+        ):
+            normalize_triplets(
+                film=film,
+                dark=dark,
+                flat=flat,
+                output=self.root / "bad-layout",
+            )
 
     def test_refuses_nonempty_destination(self) -> None:
         destination = self.root / "existing"
