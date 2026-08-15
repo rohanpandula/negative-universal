@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "negative-universal"
-version = "0.1.0"
+version = "0.2.0"
 description = "Calibrated sequential RGB film-scanning experiments"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -12,6 +12,11 @@ license = "MIT"
 
 [project.scripts]
 negative-universal = "negative_universal.cli:main"
+capture-one = "negative_universal.capture_one:main"
+
+[project.optional-dependencies]
+raw = ["rawpy>=0.27,<0.28"]
+hardware = ["rawpy>=0.27,<0.28", "pyserial>=3.5,<4"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

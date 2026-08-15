@@ -37,11 +37,13 @@ optics, and sensor response. Narrow peaks can improve dye separation, but they
 can also discard spectral information. Calibration can map measured
 information; it cannot recover information that was never captured.
 
-The calibration core accepts externally decoded sequential narrow-band Bayer
-mosaics and preserves their declared phase. Native camera capture and RAF/NEF
-decoding are not implemented here yet. Simultaneous white-light, one-shot Bayer
-capture is a separate experiment and must not be mixed into the acceptance
-criteria for the sequential rig.
+The calibration core accepts sequential narrow-band Bayer mosaics and preserves
+their declared phase. The optional decoder now extracts the undemosaiced
+visible plane from GFX100 II RAF and Nikon Zf NEF files while retaining the
+native file and a versioned provenance receipt. The first-party gPhoto/ScanLight
+adapter is implemented but not physically tested. Simultaneous white-light,
+one-shot Bayer capture is a separate experiment and must not be mixed into the
+acceptance criteria for the sequential rig.
 
 ## Three independent correction layers
 
@@ -114,13 +116,13 @@ sample in the stored PGM. Film, dark, and flat must use the same active crop,
 orientation, dimensions, maximum code, ISO/gain, exposure regime, and CFA
 phase. An odd raw-crop offset changes the phase.
 
-The camera adapter must decode native RAW to a linear mosaic without camera
-white balance, demosaicing, gamma/tone, auto-brightening, auto black-level
-changes, rotation, lens correction, denoising, sharpening, pixel shift, or HDR.
-Keep the native RAF/NEF alongside derived calibration data once the native-file
-manifest contract is implemented. Matching CFA sites can be resampled later;
-ordinary broadband demosaicing is not measurement-preserving under one
-narrow-band LED.
+The native decoder reads rawpy's `raw_image_visible` directly. It does not call
+LibRaw post-processing, so white balance, demosaicing, gamma/tone,
+auto-brightening, rotation, lens correction, denoising, sharpening, pixel shift
+and HDR never enter this path. It retains the RAF/NEF and records the exact
+decoder versions, visible crop, unapplied orientation, CFA phase, black levels
+and camera white level. Matching CFA sites can be resampled later; ordinary
+broadband demosaicing is not measurement-preserving under one narrow-band LED.
 
 ### Power and exposure rules
 
@@ -140,6 +142,23 @@ narrow-band LED.
 A monitor photodiode would make source dose and warm-up drift directly
 observable. It is useful but not required for the first experiment if flats
 bracket each scan session.
+
+The `calibrate-clear-base` command analyzes an explicit clear processed-film
+ROI together with its matched dark and empty-gate flat. It meters R illumination
+on R sites, G on both G site classes and B on B sites. The maximum per-site flat
+p99 caps the recommendation across the CFA classes, but does not guarantee that
+every defect or brighter tail sample remains below saturation. If a RAW receipt
+reports four equal per-site white levels no greater than the PGM maximum, that
+scalar is the full-well ceiling after dark subtraction. It must match across the
+clear-base, dark, and flat captures; absent levels fall back to the PGM maximum,
+and unequal per-site geometry is rejected. Thus Nikon Zf levels of `15311` are
+used with a rawpy global white/PGM maximum of `16383`. The command holds PWM
+fixed, distinguishes commanded from applied exposure, and reports the ideal
+multiplier separately from the rounded command recommendation. The target and
+ceiling fractions are required inputs because no physical measurements yet
+justify universal defaults. Every accepted change requires newly matched dark,
+flat and film captures. This is acquisition headroom calibration, not white
+balance.
 
 ### Calibration keys
 
@@ -249,6 +268,7 @@ capture-one capture
   --power 0..1
   --exposure-us INTEGER
   --output /absolute/path/channel.pgm
+  [--receipt /absolute/path/channel.receipt.json]
 ```
 
 It also requires an idempotent lights-off action:
@@ -271,9 +291,13 @@ with `--timeout-seconds`. The adapter must:
 6. switch every light off in a guaranteed cleanup path;
 7. return zero only after the file is durable and complete.
 
-This boundary keeps the camera and light implementations replaceable. The
-manifest records **commanded** power and exposure, not measured radiance or
-verified shutter timing.
+This boundary keeps the camera and light implementations replaceable. Bayer
+capture requires a receipt and retained native RAW; legacy mono adapters may
+still provide PGM only. Manifest schema 2 records hashes for the RAW and
+receipt, the commanded power/exposure, verified shutter choice, camera
+model/available serial, fixed ISO, RAW mode, manual exposure mode, settle delay
+and available memory-card capture target, plus emitted PWM code. None is
+measured radiance or actual shutter timing.
 
 ### Scanlight mapping
 
@@ -297,14 +321,19 @@ a configurable settle delay measured on the physical light, and describe `PP`
 as a commanded PWM code rather than measured light power. Power supply mode,
 hardware revision, and trim can change actual drive.
 
-The existing
-[TriRGB `scanlightctl`](https://github.com/rohanpandula/TriRGB/tree/7ec5bdd8dfc5729f272601208bfc9b9b64e69ce2/phase1/scanlightctl)
-is a source-reviewed encoder/reader that can be reused after hardening; it is
-not itself the `capture-one` adapter. It currently does not probe before
-enable, drain and hold after writes, or send off when its context exits. The
-adapter must add those behaviors, its own `finally: off`, and the parent
-cleanup. Use an explicit serial port for unattended work and probe
-firmware/hardware before enabling a channel.
+The included first-party adapter implements those bytes directly. It requires
+explicit Scanlight and gPhoto ports, a measured settle delay and the expected
+hardware ID. Before enabling a channel it sends OFF, probes firmware/hardware,
+verifies the requested camera shutter, and requires fixed ISO, RAW-only format
+and manual exposure mode. It records the gPhoto camera model, available serial,
+selected driver and settle delay so matched captures can reject changes. It
+verifies complete serial writes, downloads exactly one RAF or NEF into a private
+staging directory, sends OFF in `finally`, retains the local RAW and publishes a
+provenance receipt. gPhoto `--keep` prevents an explicit camera-side deletion;
+when the camera exposes `/main/settings/capturetarget`, the adapter selects and
+re-verifies `Memory card` before light-on. A camera without that control has
+only best-effort camera-side recovery. The outer controller independently sends
+OFF before and after every exposure.
 
 Current firmware has no watchdog and retains the last commanded output after a
 host failure. Static review also found that its over-temperature state can be
@@ -318,9 +347,8 @@ not configure camera exposure.
 
 ### Candidate Bayer camera control paths
 
-Neither path below is integrated or hardware-tested by this repository. Both
-named cameras have vendor-supported tethering and current libgphoto2 capture
-support:
+The common gPhoto adapter is integrated but not hardware-tested. Both named
+cameras have vendor-supported tethering and current libgphoto2 capture support:
 
 - Fujifilm documents
   [GFX100 II USB/Wi-Fi/Ethernet tethering](https://fujifilm-dsc.com/en/manual/gfx100ii/connections/tethere/index.html)
@@ -362,12 +390,25 @@ camera-control applications simultaneously. NX Tether requires Nikon-ID sign
 in and online reauthentication after more than 30 days offline, which makes it
 less suitable as an unattended appliance dependency.
 
+Both named gPhoto snapshots expose camera model, serial, ISO and exposure
+program. Their RAW-mode controls differ: GFX100 II uses
+`/main/imgsettings/imageformat`, while Zf uses
+`/main/capturesettings/imagequality`. The adapter accepts either path, requires
+the reported mode to be RAW-only, and fails before light-on when a required
+control is absent. The Zf snapshot also exposes a `Memory card` capture-target
+choice; the GFX100 II snapshot does not expose that control, so its recovery
+behavior must be hardware-tested. ScanLight's probed hardware ID identifies a
+supported board revision, not a unique physical unit; use the declared
+configuration ID and a stable port assignment to identify that part of the rig.
+
 For initial Nikon decoder tests, use lossless-compressed NEF rather than HE or
 HE★. [LibRaw 0.22.0](https://github.com/LibRaw/LibRaw/blob/0.22.0/Changelog.txt)
 introduced Zf standard-compression and GFX100 II RAF support. That is only a
-decoder compatibility claim: pin and record the actual decoder version, then
-verify sample files preserve mosaic codes, active crop, CFA phase, and
-black/white metadata before producing the core's PGM input.
+decoder compatibility claim. The implemented path was run twice against owned
+samples from both bodies and produced byte-identical PGMs per source: GFX100 II
+decoded to an RGGB 11662×8746 plane with black 4094 and white 65535; Zf decoded
+to RGGB 6064×4040 with black 1008 and white 16383. This verifies deterministic
+unpacking and metadata capture for those files, not camera linearity or color.
 
 ## Validation protocol
 
@@ -398,8 +439,8 @@ density-dependent errors.
 
 ## First milestones
 
-1. Implement a GFX100 II or Nikon Zf `capture-one` adapter and prove that
-   failures always leave the lights off.
+1. Hardware-test the implemented GFX100 II or Nikon Zf `capture-one` adapter,
+   including unplug and process-failure cases with a normally-off interlock.
 2. Produce repeatable dark/flat-normalized R/G/B captures from the physical rig.
 3. Establish linearity, clipping, noise, drift, and registration limits.
 4. Capture a multi-frame, multi-density paired reference dataset.
@@ -407,6 +448,6 @@ density-dependent errors.
    hold-out validation.
 6. Evaluate per-frame correction only after the earlier stages are stable.
 
-Deferred until real files and hardware require them: native RAF/NEF ingestion,
-CFA resampling, defect repair, subpixel registration, HDR merging, temperature
-compensation, profile fitting, and automatic gray balance.
+Deferred until real files and hardware require them: CFA resampling, defect
+repair, subpixel registration, HDR merging, temperature compensation, profile
+fitting, clear-base removal, and automatic gray balance.

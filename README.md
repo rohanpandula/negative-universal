@@ -55,9 +55,12 @@ classes behind the same capture boundary:
 - a Bayer camera such as a Fujifilm GFX100 II or Nikon Zf, where every exposure
   is preserved as an undemosaiced raw CFA mosaic.
 
-Native RAF/NEF ingestion and the camera-specific `capture-one` adapter are not
-implemented yet. “Bayer support” currently means recording and cross-checking
-the declared CFA phase while normalizing an adapter-produced mosaic PGM.
+Native GFX100 II RAF and Nikon Zf NEF ingestion is implemented through rawpy's
+undemosaiced `raw_image_visible` plane. The decoder copies rawpy's returned
+integer mosaic without scaling or black subtraction and records the visible
+crop and CFA phase; it never invokes white balance, demosaicing, rotation or
+LibRaw post-processing. A first-party gPhoto/ScanLight `capture-one` adapter is
+included, but has not yet been exercised on connected hardware.
 
 The film remains stationary while narrow-band red, green, and blue lights are
 exposed one at a time. `R.pgm`, `G.pgm`, and `B.pgm` name the illumination
@@ -87,7 +90,13 @@ It intentionally starts with binary PGM (`P5`) input and output. PGM preserves
 one plane of 8- or 16-bit samples, including an undemosaiced Bayer mosaic,
 without adding a native RAW/TIFF dependency to the calibration core. Samples
 must be linear numeric codes, not display-ready grayscale; a generic image
-viewer may apply an inappropriate display transfer curve.
+viewer may apply an inappropriate display transfer curve. Native decoding sets
+the PGM maximum to rawpy's global camera white level and retains the returned
+black pedestal. When a RAW receipt supplies four equal per-site saturation
+levels at or below that PGM maximum, clear-base calibration uses their scalar
+value as the full-well ceiling; otherwise it uses the PGM maximum. The scalar
+must match across the clear-base, dark, and flat captures. Unequal per-site
+levels are not modeled and are rejected.
 
 Install locally:
 
@@ -96,6 +105,15 @@ python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -e .
 ```
+
+Install the optional RAW decoder and hardware adapter dependencies with:
+
+```sh
+python -m pip install -e '.[hardware]'
+```
+
+The adapter also needs the external `gphoto2` command; the Python extra does
+not install that operating-system tool.
 
 Create `rig.json`:
 
@@ -121,15 +139,31 @@ crop or orientation operation. Film, dark, and flat captures must keep the
 same dimensions, crop, orientation, gain, code range, and CFA phase. The
 capture and normalized manifests record and cross-check this declared value.
 
+Decode an existing camera RAW without demosaicing. The RAW, PGM and receipt
+must be siblings with the same stem:
+
+```sh
+negative-universal decode-raw --input scan/R.RAF --output scan/R.pgm \
+  --receipt scan/R.receipt.json
+```
+
+The receipt records the rawpy and bundled LibRaw versions, visible crop,
+unapplied orientation, CFA phase, black levels and camera white level. Capture
+manifest schema 2 hashes the original RAF/NEF and receipt, and rejects matched
+film/dark/flat sets whose decoder, recorded camera state, connection endpoints,
+or ScanLight timing differ. Camera model and serial are included when gPhoto
+exposes them; the declared configuration ID remains authoritative when a device
+does not expose a unique serial.
+
 Capture matched datasets:
 
 ```sh
 negative-universal capture --kind dark --settings rig.json \
-  --rig ./capture-one --output scan/dark
+  --rig .venv/bin/capture-one --output scan/dark
 negative-universal capture --kind flat --settings rig.json \
-  --rig ./capture-one --output scan/flat
+  --rig .venv/bin/capture-one --output scan/flat
 negative-universal capture --kind film --settings rig.json \
-  --rig ./capture-one --output scan/film
+  --rig .venv/bin/capture-one --output scan/film
 ```
 
 Normalize without overwriting the source captures:
@@ -139,6 +173,27 @@ negative-universal normalize --film scan/film --dark scan/dark \
   --flat scan/flat --output scan/normalized
 ```
 
+For a clear processed-film ROI, recommend new shutter times while holding LED
+power fixed. Both fractions are explicit experimental choices, not universal
+defaults; any change requires recapturing the matched dark and flat:
+
+```sh
+negative-universal calibrate-clear-base \
+  --clear-base calibration/clear-base --dark calibration/dark \
+  --flat calibration/flat --roi 100,200,400,300 \
+  --target-base-fraction 0.30 --flat-ceiling-fraction 0.80 \
+  --output calibration/exposure-recommendation
+```
+
+The analysis meters the matching CFA sites for each illumination and caps the
+recommendation with the highest per-site empty-gate-flat p99. This constrains
+that recorded percentile, not every defect or outlier. Fractions use the
+matched receipt saturation scalar rather than blindly using the PGM container
+maximum; for example, four Nikon Zf values of `15311` are used even when the PGM
+maximum is `16383`. The manifest separates commanded and applied exposure, the
+ideal model multiplier, and the rounded command recommendation. It performs no
+white balance or base removal.
+
 The external `capture-one` command is the only hardware seam. It receives one
 channel, normalized light power, exposure time, capture kind, and output path.
 It must also implement an idempotent `capture-one off` command. The controller
@@ -146,7 +201,6 @@ calls `off` before the sequence and after every exposure, and terminates a
 capture that exceeds the configurable timeout. The adapter must still turn the
 light off in its own cleanup path; real hardware also needs a normally-off
 output or watchdog because software cannot recover from power or process loss.
-Vendor-specific adapters come after the actual hardware APIs are known.
 
 ### Scanlight and tethered cameras
 
@@ -158,32 +212,53 @@ power to the nearest `0..255` command code, keep white/IR/save at zero, wait for
 the light to settle, and send all-off in `finally`. Set-color has no
 acknowledgement, and the command value is PWM—not measured optical power.
 
-The existing [TriRGB `scanlightctl`](https://github.com/rohanpandula/TriRGB/tree/7ec5bdd8dfc5729f272601208bfc9b9b64e69ce2/phase1/scanlightctl)
-is a source-reviewed protocol building block already installed on the
-development Mac; it is not yet the fail-safe `capture-one` adapter. That
-adapter must add firmware/hardware probing before enable, deterministic write
-drain and settle timing, internal `finally: off`, and the parent cleanup. The
+The included `capture-one` adapter uses an explicit serial port, sends OFF
+before opening the shutter, probes firmware and hardware before enabling a
+channel, verifies complete writes, and sends OFF in `finally`. Configure it
+through inherited environment variables; no serial or camera auto-selection
+is used while a light can be energized:
+
+```sh
+export NEGATIVE_UNIVERSAL_SCANLIGHT_PORT=/dev/cu.usbmodem-REPLACE
+export NEGATIVE_UNIVERSAL_SCANLIGHT_HW_ID=3
+export NEGATIVE_UNIVERSAL_GPHOTO_PORT=usb:001,002
+export NEGATIVE_UNIVERSAL_SETTLE_MS=REPLACE_WITH_MEASURED_DELAY
+capture-one probe
+```
+
+`NEGATIVE_UNIVERSAL_GPHOTO2` can select a non-default gPhoto executable and
+`NEGATIVE_UNIVERSAL_GPHOTO_CAMERA` can select a named driver. Before enabling
+the light, the adapter requires manual exposure mode, fixed numeric ISO and a
+RAW-only image format, and records those values plus the camera model, available
+serial, selected driver and settle delay. It downloads exactly one RAF or NEF
+through a private staging directory, verifies or sets the requested shutter,
+retains the local native file, and publishes a complete provenance receipt. It
+also passes gPhoto `--keep`, preventing gPhoto from explicitly deleting the
+camera-side object. When gPhoto exposes a capture-target control, the adapter
+selects and re-verifies `Memory card` before light-on. Without that control,
+camera-side recovery is best-effort; clear persistent card copies only after
+verifying the published dataset. The
 Scanlight firmware can retain its last output after host failure, so unattended
 use still needs a normally-off hardware enable/watchdog and independent
 thermal cutoff.
 
-Both named cameras have candidate computer-capture paths, none integrated or
-hardware-tested by this repository yet. Fujifilm documents
+Neither named camera has been physically exercised by this repository yet.
+Fujifilm documents
 [GFX100 II tethering](https://fujifilm-dsc.com/en/manual/gfx100ii/connections/tethere/index.html),
 and Nikon lists the Zf in
 [NX Tether](https://downloadcenter.nikonimglib.com/en/download/sw/276.html).
 The current
 [libgphoto2 support list](https://gphoto.sourceforge.io/proj/libgphoto2/support.php)
-also reports capture and configuration support for both. The first adapter
-should use native RAF/NEF, lock manual camera state, and use a pinned decoder
-validated to preserve linear mosaic codes, crop, CFA phase, and black/white
-metadata. It must never feed the core a rendered JPEG.
+also reports capture and configuration support for both. A published GFX100 II
+snapshot exposes writable shutter choices. A published Zf snapshot exposes a
+read-only shutter, so the adapter verifies the physically selected value and
+fails before turning on the light if it differs. It never accepts a rendered
+JPEG.
 
-Manifest power and exposure fields are explicitly **commanded** settings. They
-must not be described as measured light dose or actual shutter timing until a
-driver returns that feedback.
+Manifests distinguish commanded power/exposure from the applied shutter choice
+and emitted Scanlight PWM code. None of those values is measured optical dose.
 
-Run the tests with only the Python standard library:
+Run the complete tests after installing the hardware extra:
 
 ```sh
 PYTHONPATH=src python3 -m unittest discover -s tests -v
@@ -230,12 +305,16 @@ No Fujifilm binaries, tables, or decompiler output are copied here.
 - [x] Record and cross-check the declared mono/Bayer CFA layout through capture
       and normalization.
 - [x] Map the current Scanlight firmware protocol to the `capture-one` seam.
-- [ ] Implement and hardware-test the first GFX100 II or Nikon Zf
-      `capture-one` adapter.
+- [x] Implement a fail-closed gPhoto/Scanlight `capture-one` adapter and test its
+      protocol, shutter and cleanup behavior with simulated hardware.
+- [x] Add fixed-scale native RAF/NEF mosaic extraction, receipts and manifest
+      provenance; validate it on owned GFX100 II and Nikon Zf files.
+- [x] Add a clear-base exposure/headroom recommender that preserves LED power
+      and requires newly matched dark and flat captures.
+- [ ] Hardware-test the adapter on the connected camera and Scanlight, including
+      unplug, timeout and normally-off interlock behavior.
 - [ ] Measure dark, flat, linearity, drift, LED spectrum/power, and R/G/B
       registration on the physical rig.
-- [ ] Add native RAF/NEF-to-mosaic interchange after real camera files define
-      the decoder and metadata contract.
 - [ ] Collect paired reference scans covering multiple frames, stocks, and
       exposure ranges, with hold-out validation.
 - [ ] Add versioned stock profiles and measured clear-roll base removal.
@@ -255,6 +334,8 @@ cannot reconstruct information the camera/light combination never measured.
 - [digital-fauxice](https://github.com/rohanpandula/digital-fauxice)
 - [ScanStudio](https://github.com/rohanpandula/ScanStudio)
 - [TriRGB](https://github.com/rohanpandula/TriRGB)
+- [NegPy](https://github.com/marcinz606/NegPy) (GPL-3.0 reference only; no code,
+  profiles, matrices, or ICC assets are copied into this MIT project)
 - [Scanlight](https://github.com/jackw01/scanlight)
 
 ## Latest validated stock findings
