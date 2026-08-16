@@ -295,6 +295,14 @@ The independent evidence ledger is in
 [frontier-sp500-research](https://git.roflix.club/rohan/frontier-sp500-research).
 No Fujifilm binaries, tables, or decompiler output are copied here.
 
+The MS11 installer also ships a first-party simulator harness: a scanner
+simulator, dummy order/GUI clients, a simulated 1394 transport, and a
+frame-detection telemetry override. It can run the genuine color pipeline with
+no scanner attached, and its input contract is a small three-channel raw plus
+INI files, so a VM golden-master comparison against this project's pipeline is
+practical. See
+[MS11 simulator harness](docs/MS11-SIMULATOR-HARNESS.md).
+
 ## Roadmap
 
 - [x] Recover and validate narrow Noritsu, Nikon, and FlexColor paths.
@@ -317,6 +325,11 @@ No Fujifilm binaries, tables, or decompiler output are copied here.
       registration on the physical rig.
 - [ ] Collect paired reference scans covering multiple frames, stocks, and
       exposure ranges, with hold-out validation.
+- [ ] Run MS11 in a VM with its own scanner simulator; record the no-hardware
+      module layout and fine-scan raw header; capture golden-master outputs
+      for owned inputs.
+- [ ] Calibrate the rig-to-SP-500 measurement delta from paired scans of the
+      same frames, and test stock-independence with held-out stocks.
 - [ ] Add versioned stock profiles and measured clear-roll base removal.
 - [ ] Train an independent, auditable per-frame estimator from owned data.
 - [ ] Compare Noritsu, Frontier, Nikon, FlexColor, and custom render stages.
