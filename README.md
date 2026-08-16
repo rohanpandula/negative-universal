@@ -340,7 +340,11 @@ cannot reconstruct information the camera/light combination never measured.
 
 ## Related repositories
 
-- [noritsu-tool](https://github.com/rohanpandula/noritsu-tool)
+- [noritsu-tool](noritsu-tool/) — vendored as a git subtree and now the
+  canonical copy: includes the exact-replay pipeline (PCB/PRM decode,
+  vendor tables, 38-stage audit) that reproduced the native 2015 RD5X
+  engine byte-for-byte on the pinned fixed job. The GitHub mirror is
+  the earlier historical state.
 - [cool-colors](https://github.com/rohanpandula/cool-colors)
 - [flexcolor-tool](https://github.com/rohanpandula/flexcolor-tool)
 - [frontier-sp500-research](https://git.roflix.club/rohan/frontier-sp500-research)
