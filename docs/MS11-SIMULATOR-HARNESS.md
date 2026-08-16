@@ -41,6 +41,45 @@ Notable details:
 - One DLL even ships with a `.sim` twin (`WFOMAIFOET.dll.sim`), confirming the
   copy-over swap pattern.
 
+## Mode and environment switching
+
+Beyond the file-swap dummies, the install ships a complete registry-driven mode
+system in `Frontier\Setup` (113 `.reg` toggles) plus mode packages in `TOOL`:
+
+- **Scanner presence**: `FilmScannerExist.REG` / `FilmScannerNotExist.REG`
+  set `HKLM\SOFTWARE\FUJIFILM\Frontier\CurrentVersion\System\InputUnit`
+  `FilmScanner_1/2 = 1/0`. The runtime trusts this key; software-level
+  scanner presence does not require the USB device after install.
+- **Printer presence and model**: `PrinterExist.reg` /
+  `PrinterNotExist.reg`, model selectors (`Printer_LP1500.reg`,
+  `Printer_LP3000.reg`, `Printer_LPKariba.reg`, `SysInfoPrinter*.reg`), and
+  `DummyPrinterSet.reg`, which defines a `PrintOutputDeviceInfo` entry with
+  `TargetName_1 = "Dummy@localhost"` and `HostName_1 = "localhost"` — a
+  software printer target.
+- **Legacy vs PIC master mode**: `B20_Legacy.REG` (Mode = 0) versus
+  `B20_PIC.REG` (Mode = 1) under
+  `HKLM\SOFTWARE\FUJIFILM\Frontier\B20\Config\CurrentVersion`. PIC mode
+  re-points the system away from F-DIA toward a PIC server; the shipped
+  `PIC_SETUP` README warns that after C4/C5, restoring does not bring
+  F-DIA functions back.
+- **PIC_SETUP package** (`TOOL\PIC_SETUP`): swaps
+  `D:\Fujifilm\DnaApps\Q0\Profile\COMMON.INI` for `PIC_COMMON.ini`
+  (retention deadlines to 0, `InspectionAuto = 1`) and hides media-service
+  menus via `MenuList\UserLevel_*` registry values. The `COMMON.ini`
+  template also documents the workflow-engine flags: `ServerHost`
+  (settable to `localhost`), `IsEZ2`, and `Standalone` — an explicit
+  "EZ2-alone mode" flag, which is the documented headless/no-server
+  configuration.
+- **Per-device dummy environments** (`SET_*` / `DEL_*` in `TOOL`): each
+  script preserves the real component as `.ORG` and copies the dummy in
+  place (FDIA clients, OMA, PU800/PU8Ctrl printers, VirGUI, CD-R AC,
+  DummyAC/F25, MT, PTOP, DNA dummy environment rebuild).
+
+Practical consequence for the harness: after a base install, the no-hardware
+configuration is assembled from registry toggles (scanner/printer presence,
+mode) plus dummy swaps — all scriptable, no hardware required at any point
+after the installer's USB gate.
+
 ## How "film" is represented
 
 Film is never physically modeled. Three separate mechanisms stand in for it:
