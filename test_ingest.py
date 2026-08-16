@@ -7,6 +7,7 @@ Self-contained; builds every input synthetically. Covers:
 - load_image routing: .RAW to the LS-600 decoder (BGR flipped to RGB),
   scanner NEFs to their RGB SubIFD, camera-style NEFs left for rawpy
 """
+
 import sys
 import tempfile
 from pathlib import Path
@@ -35,12 +36,13 @@ def test_detect_dims():
     print("detect_dims OK")
 
 
-def test_load_raw(tmp):
+def test_load_raw(tmp_path):
+    tmp = tmp_path
     w, h = 50, 40
     bgr = np.zeros((h, w, 3), dtype="<u2")
-    bgr[..., 0] = 4095   # B saturated
-    bgr[..., 1] = 2048   # G mid
-    bgr[..., 2] = 100    # R low
+    bgr[..., 0] = 4095  # B saturated
+    bgr[..., 1] = 2048  # G mid
+    bgr[..., 2] = 100  # R low
     p12 = tmp / "frame12.raw"
     bgr.tofile(p12)
 
@@ -77,12 +79,13 @@ def test_load_raw(tmp):
     big.tofile(pbig)
     img = io_util.load_image(pbig)
     assert img.shape == (1000, 4042, 3)
-    assert abs(img[0, 0, 0] - 100 / 4095) < 1e-6   # R now first
-    assert abs(img[0, 0, 2] - 1.0) < 1e-6          # B now last
+    assert abs(img[0, 0, 0] - 100 / 4095) < 1e-6  # R now first
+    assert abs(img[0, 0, 2] - 1.0) < 1e-6  # B now last
     print("load_ls600_raw OK")
 
 
-def test_nef_routing(tmp):
+def test_nef_routing(tmp_path):
+    tmp = tmp_path
     import tifffile
 
     thumb = (np.linspace(0, 255, 12 * 16 * 3).reshape(12, 16, 3)).astype(np.uint8)
@@ -96,7 +99,9 @@ def test_nef_routing(tmp):
         tw.write(thumb, subifds=1, photometric="rgb")
         tw.write(full, photometric="rgb", subfiletype=0)
     img = io_util.load_image(scanner)
-    assert img.shape == (64, 96, 3), "scanner NEF must load its RGB SubIFD, not the thumbnail"
+    assert img.shape == (64, 96, 3), (
+        "scanner NEF must load its RGB SubIFD, not the thumbnail"
+    )
     assert abs(img[0, 0, 0] - 1.0) < 1e-6
     assert abs(img[0, 0, 2] - 4096 / 65535) < 1e-6
 
@@ -104,7 +109,11 @@ def test_nef_routing(tmp):
     camera = tmp / "camera.nef"
     with tifffile.TiffWriter(camera) as tw:
         tw.write(thumb, subifds=1, photometric="rgb")
-        tw.write(np.zeros((400, 300), dtype=np.uint16), photometric="minisblack", subfiletype=0)
+        tw.write(
+            np.zeros((400, 300), dtype=np.uint16),
+            photometric="minisblack",
+            subfiletype=0,
+        )
     assert io_util._load_scanner_nef(camera) is None
 
     # no SubIFDs at all -> not ours either

@@ -1,6 +1,10 @@
 # Waking the Mother Ship
 ### Reverse-engineering the "Noritsu look" from a folder of 2005 binaries
 
+> **Historical narrative.** Several early explanations and fidelity claims were
+> superseded by the installer/captured-job audit. The current technical record
+> is `README.md` plus `docs/INSTALLER_PIPELINE_AUDIT.md`.
+
 *How a 1 GB ISO of dead Windows software became a working film-negative
 inverter, a tour of a hidden Japanese image-processing engine, and a lesson in
 knowing when a reverse-engineering project has told you all it's going to.*

@@ -1,5 +1,9 @@
 # Reverse-Engineering the Noritsu LS-600 "Look" — A Journey Log
 
+> **Historical notebook.** It preserves hypotheses as they evolved and contains
+> superseded claims. See `README.md`, `docs/INSTALLER_PIPELINE_AUDIT.md`, and a
+> generated audit manifest for the current evidence boundary.
+
 > Running story of what we did, in order. Raw material for a blog post.
 > Kept up to date as the work happens. Last updated: 2026-08-05.
 

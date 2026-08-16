@@ -1,63 +1,44 @@
-# LS-600 Per-Film Correction Tables
+# Recovered CorrectServ data
 
-These are extracted numerical parameters from the Noritsu LS-600's
-`SpecialPcb.dll` / `ImgDataProc` engine. They define the per-film gamma
-curves, contrast LUTs, and white-balance adjustments that give the LS-600
-its distinctive look.
+These files contain derived numeric data from the Noritsu `CorrectServ` tree.
+They are not film-stock profiles.
 
-## Source
+The source hierarchy selects quality group/type, negative/positive, format
+(135/120/240/110), and color/B&W. `ImgQltMrg.xml` maps Nega to quality types 0
+and 1. The four supported Nega 135 selections are therefore group 0/1 × type
+0/1; code rejects the old unsupported type-5 default.
 
-Extracted from the LS-600 EZ Controller 6.5 installer's
-`ImgDataProc/Data/CorrectServ/IQGrp000/00000005/PCB_PARA/` directory.
-The original files are vendor binaries not distributed here — this JSON is
-our derived knowledge (numbers extracted from the binary structures).
+## Files
 
-## File naming
-
-```
-{PREFIX}_{FORMAT}_{TYPE}_{VARIANT}.dat
-```
-
-| Part | Meaning |
-|---|---|
-| `NEGA` | Color negative (C-41) |
-| `POSI` | Color positive / slide (E-6) |
-| `BWNEGA` | Black & white negative |
-| `135` | 35mm film |
-| `120` | Medium format |
-| `240` | 120/220 medium format (alt) |
-| `110` | 110 format |
-| `COL` | Color |
-| `BW` | Black & white |
-| `para` | Parameter table (the source data) |
-| `calc` | Calculated / derived table |
-
-## JSON contents
-
-| File | Role |
+| File | Status |
 | --- | --- |
-| `base_tone_curve.json` | **Loaded at runtime.** The CommonCalcPara 20-point base tone curve for each IQ variant (`00000000`–`00000006`). This is what `--real-curve` reads. |
-| `per_film_tables.json` | Reference only — extracted numbers and metadata for the full set of per-film table files. No code loads it. |
+| `vendor_nega_135.json` | executable, verified extraction used by `noritsu.tables` |
+| `base_tone_curve.json` | legacy compatibility data; not sufficient to reproduce the vendor curve builder |
+| `per_film_tables.json` | historical reference only; no production path loads it |
 
-The raw `.dat` binaries are not shipped; these JSON files carry the
-human-readable extracted numbers.
+`vendor_nega_135.json` records:
 
-## How to use
+- the exact R/G/B 4096-entry Nega FilmLUT;
+- three CommonCalc X/Y 20-point control pairs;
+- the normal-output `ExecPattern=5` selector vector;
+- source sizes and SHA-256 hashes.
 
-The base tone curve loads automatically via `--real-curve`. No vendor data is
-needed — the numbers ship in `base_tone_curve.json`:
+The first CommonCalc 20-word block is X coordinates, not output values. A real
+final gamma curve also requires `pcb_MakeGammaCurve2`, negative-tone anchoring,
+and per-job controller inputs; direct interpolation is only a diagnostic.
 
+## Read an installed table tree
+
+Set `NORITSU_TABLES` to the directory containing `IQGrp000`, `IQGrp001`, and
+their variant subdirectories:
+
+```sh
+NORITSU_TABLES=/path/to/ImageDataProc/Data/CorrectServ \
+  python -m noritsu.audit ...
 ```
-python -m noritsu.cli scan.tif -o out.tif --real-curve
-```
 
-If you have a real EZ Controller data tree, point `NORITSU_TABLES` at its
-`CorrectServ` directory and the original `.dat` files are read instead:
-
-```
-NORITSU_TABLES=/path/to/ImgDataProc/Data/CorrectServ \
-  python -m noritsu.cli scan.tif -o out.tif --real-curve
-```
-
-The CLI defaults to variant `00000005`. Variant `00000000` is a linear ramp,
-i.e. a no-op curve.
+When `NORITSU_TABLES` is set, the loader consumes the verified struct sizes and
+records the actual selected paths, file sizes, and hashes in the audit
+manifest. The checked-in decoded artifact records source filenames, sizes, and
+hashes without claiming a live filesystem path. Returned arrays and provenance
+records are independent copies, so callers cannot mutate cached state.

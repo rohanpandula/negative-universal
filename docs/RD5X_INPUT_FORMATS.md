@@ -161,3 +161,27 @@ can initialize, decode pixels, run its conversion worker, and encode a new
 file without pretending that arbitrary RGB pixels are valid scanner-negative
 measurements.
 
+## Verified owner FULL replay
+
+The recovered film-file ABI has now been exercised with the actual owner scan,
+not only synthetic rasters. `FULL000000010000.RAW` is 154,994,532 bytes and
+decodes as a portrait `(6391,4042,3)` BGR uint16 array. The captured film-file
+descriptor is landscape (`width=6391,height=4042,type=2`), so passing the
+portrait byte stream unchanged changes its row stride and produces a visibly
+scrambled negative control.
+
+The successful replay performs exactly this storage repack before handing the
+bytes to the native descriptor:
+
+```python
+native_bgr = np.ascontiguousarray(np.rot90(portrait_bgr, 1))
+```
+
+No sample or channel conversion occurs. The resulting landscape byte stream is
+SHA-256 `b89a8d2427f8fc5c4905dde773cb64f1035770a36233e372ce1599107ab28534`.
+With the canonical full-scan correction/PCB state, shipped CmdID 7 returned
+success and wrote a 6048×4011 RGB8 TIFF, SHA-256
+`ef67372413ede29625061d820414ffb32b2df194dddb196f130726aaa8fd9c5b`.
+This establishes the descriptor, channel, stride, content, and orientation
+contract end to end. It does not establish a universal orientation rule for
+other captures; their storage/export orientation must still be validated.

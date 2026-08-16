@@ -70,8 +70,10 @@ def crop_to_film(linear, pad=0, min_frac=0.3, row_thresh=0.5):
         return linear, (0, linear.shape[0], 0, linear.shape[1])
     r0, r1 = rows[0], rows[-1] + 1
     c0, c1 = cols[0], cols[-1] + 1
-    r0 = max(0, r0 - pad); c0 = max(0, c0 - pad)
-    r1 = min(linear.shape[0], r1 + pad); c1 = min(linear.shape[1], c1 + pad)
+    r0 = max(0, r0 - pad)
+    c0 = max(0, c0 - pad)
+    r1 = min(linear.shape[0], r1 + pad)
+    c1 = min(linear.shape[1], c1 + pad)
     return linear[r0:r1, c0:c1], (r0, r1, c0, c1)
 
 

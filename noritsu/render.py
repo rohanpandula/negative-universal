@@ -111,7 +111,11 @@ def render(
             t = (idx - i0).astype(np.float32)
             out = arr[i0] * (1 - t) + arr[i1] * t
         else:
-            f = lambda v: noritsu_tone_curve(v, tone_contrast, tone_toe, tone_gamma)
+            def f(v):
+                return noritsu_tone_curve(
+                    v, tone_contrast, tone_toe, tone_gamma
+                )
+
             out = np.stack([f(out[..., c]) for c in range(3)], axis=-1)
     # saturation
     if abs(saturation - 1.0) > 1e-4:

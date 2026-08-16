@@ -7,6 +7,7 @@ Recovered layout (from two LS-600 RAW samples provided by an LS-600 owner):
   detect_dims() recovers other frame sizes from the byte count alone.
 Returns float32 (H, W, 3) in [0,1], channels BGR, linear (no gamma, no WB).
 """
+
 import os
 
 import numpy as np
@@ -59,7 +60,7 @@ def detect_dims(size):
         return cands.pop()
 
     pairs = set()
-    for a in range(_MIN_DIM, int(px ** 0.5) + 1):
+    for a in range(_MIN_DIM, int(px**0.5) + 1):
         if px % a:
             continue
         b = px // a
@@ -81,13 +82,9 @@ def is_ls600_raw(path):
         return False
 
 
-def load_ls600_raw(path, width=None, height=None, maxv=None):
-    """Decode a FULL*.RAW dump to float32 (H, W, 3) BGR in [0,1].
+def load_ls600_raw_u16(path, width=None, height=None):
+    """Decode a FULL dump without scaling, preserving its BGR uint16 slots."""
 
-    With no arguments the dimensions come from detect_dims() and the container
-    depth is sensed from the data (12-bit unless any sample exceeds 4095).
-    Pass explicit width/height/maxv to override either.
-    """
     if width is None or height is None:
         dims = detect_dims(os.path.getsize(str(path)))
         if dims is None:
@@ -96,20 +93,31 @@ def load_ls600_raw(path, width=None, height=None, maxv=None):
                 "pass width= and height= explicitly"
             )
         width, height = dims
-    d = np.fromfile(path, dtype="<u2")
+    data = np.fromfile(path, dtype="<u2")
     need = width * height * 3
-    if d.size < need:
+    if data.size < need:
         raise ValueError(
             f"{path}: expected {need} uint16 samples for {width}x{height}, "
-            f"found {d.size}"
+            f"found {data.size}"
         )
-    arr = d[:need].reshape(height, width, 3).astype(np.float32)
+    return data[:need].reshape(height, width, 3)
+
+
+def load_ls600_raw(path, width=None, height=None, maxv=None):
+    """Decode a FULL*.RAW dump to float32 (H, W, 3) BGR in [0,1].
+
+    With no arguments the dimensions come from detect_dims() and the container
+    depth is sensed from the data (12-bit unless any sample exceeds 4095).
+    Pass explicit width/height/maxv to override either.
+    """
+    arr = load_ls600_raw_u16(path, width=width, height=height).astype(np.float32)
     if maxv is None:
         maxv = 4095.0 if arr.max() <= 4095 else 65535.0
     return np.clip(arr / maxv, 0, 1).astype(np.float32)
 
+
 # --- LS-600 machine geometry transform ---
-# Verified empirically against real machine TIFFs (2026-08-04).
+# Recovered nominal rectangle plus a separately-labelled reference registration.
 # The LS-600 crops the 6391x4042 portrait raw (BGR, 12-bit) to a sub-rect
 # then resamples to 6048x4011 output. Derivation from TrzCorFile UsImRct:
 #   THUM (252x399) UsImRct=(1,10,251,388) => crop 250x378
@@ -122,16 +130,54 @@ CROP_W = 6048
 TIF_H = 4011
 TIF_W = 6048
 
+# The primary Portra 400 machine pair aligns more closely at this rectangle.
+# This is external-reference registration, not a claim about the proprietary
+# transform.  Keep it separate from the Trz-derived nominal constants above.
+REFERENCE_CROP_Y0 = 17
+REFERENCE_CROP_X0 = 171
 
-def align_to_machine(linear_bgr):
-    """Crop + resize a landscape-oriented LS-600 raw to match machine TIF geometry.
+
+def align_to_machine(
+    image,
+    *,
+    rotation_k=None,
+    crop_y=CROP_Y0,
+    crop_x=CROP_X0,
+    crop_h=CROP_H,
+    crop_w=CROP_W,
+    output_h=TIF_H,
+    output_w=TIF_W,
+):
+    """Rotate, crop, and area-resample an LS-600 raster.
 
     Args:
-        linear_bgr: (H,W,3) float32 BGR landscape raw after np.rot90(raw, 3).
+        image: an HxWx3 array in any three-channel domain.
+        rotation_k: explicit ``numpy.rot90`` count, or ``None`` when already
+            landscape. Rotation is job/export state and cannot be inferred from
+            ``ScnCrg`` alone.
+        crop_*: rectangle in the rotated image. Defaults are the Trz-derived
+            nominal transform; reference-fitting code may explicitly pass the
+            separately documented empirical registration.
 
     Returns:
-        (4011, 6048, 3) float32 BGR array, spatially aligned to machine output.
+        An ``(output_h, output_w, 3)`` array with the input dtype.
     """
     import cv2
-    cropped = linear_bgr[CROP_Y0:CROP_Y0 + CROP_H, CROP_X0:CROP_X0 + CROP_W, :]
-    return cv2.resize(cropped, (TIF_W, TIF_H), interpolation=cv2.INTER_AREA).astype(np.float32)
+
+    array = np.asarray(image)
+    if array.ndim != 3 or array.shape[2] != 3:
+        raise ValueError("image must have shape (height, width, 3)")
+    if rotation_k is not None:
+        array = np.rot90(array, int(rotation_k))
+    stop_y = int(crop_y) + int(crop_h)
+    stop_x = int(crop_x) + int(crop_w)
+    if min(crop_y, crop_x, crop_h, crop_w, output_h, output_w) < 0:
+        raise ValueError("geometry values must be non-negative")
+    if stop_y > array.shape[0] or stop_x > array.shape[1]:
+        raise ValueError("crop rectangle lies outside the rotated image")
+    cropped = array[int(crop_y) : stop_y, int(crop_x) : stop_x, :]
+    return cv2.resize(
+        cropped,
+        (int(output_w), int(output_h)),
+        interpolation=cv2.INTER_AREA,
+    ).astype(array.dtype, copy=False)

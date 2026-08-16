@@ -1,3 +1,5 @@
 numpy
 Pillow
 tifffile
+opencv-python-headless
+rawpy

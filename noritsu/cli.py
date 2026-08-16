@@ -10,8 +10,6 @@ If your scan is sRGB gamma-encoded (e.g. a flatbed JPEG/TIFF), pass --srgb-input
 import argparse
 import sys
 
-import numpy as np
-
 from . import io_util, pipeline
 
 
@@ -65,8 +63,8 @@ def main(argv=None):
     r.add_argument("--no-auto-wb", action="store_true",
                    help="disable automatic white balance")
     r.add_argument("--real-curve", action="store_true",
-                   help="use the real Noritsu tone curve extracted from "
-                        "CommonCalcPara.Dat (experimental; best with linear input)")
+                   help="directly interpolate one recovered CommonCalc control bank "
+                        "(diagnostic only; not the complete vendor curve builder)")
     r.add_argument("--calib", type=str, default=None,
                    help="calibration .npz (from noritsu.calibrate) to match a "
                         "reference rendering (e.g. NLP Noritsu or a lab scan)")
@@ -74,11 +72,8 @@ def main(argv=None):
                    choices=["portra160", "portra400", "superia800"],
                    help="auto-select a per-stock calibration profile (from real LS-600 pairs)")
     r.add_argument("--lab", action="store_true",
-                   help="'lab mode' — closer to what a Noritsu lab tech would deliver. "
-                        "Reduces contrast, lifts shadows, tames highlights. Based on "
-                        "feedback from an LS-600 operator who dials contrast -2, "
-                        "highlights -2, shadows -2, auto contrast 5, sharpness 3-5 "
-                        "vs the stock defaults.")
+                   help="illustrative gentler preset (not an exact mapping of the "
+                        "vendor DSA controls)")
 
     args = ap.parse_args(argv)
 
@@ -143,7 +138,9 @@ def run_one(in_path, out_path, args, quiet=False):
         wb_gains=parse_gains(args.wb),
         saturation=lab_sat,
         auto_wb=not args.no_auto_wb,
-        real_curve=args.lab or args.real_curve,
+        # Lab's synthetic contrast/gamma/toe controls must not be bypassed by
+        # automatically selecting the diagnostic CommonCalc interpolation.
+        real_curve=args.real_curve,
         calib=calib,
         crop=not args.no_crop,
     )

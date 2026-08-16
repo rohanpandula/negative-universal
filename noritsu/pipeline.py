@@ -1,7 +1,12 @@
-"""End-to-end Noritsu-style C-41 negative -> positive pipeline."""
+"""Illustrative C-41 negative -> positive pipeline.
+
+This older convenience pipeline is not the installer-recovery audit.  Use
+``python -m noritsu.audit`` when stage provenance and integer fidelity matter.
+"""
 import numpy as np
 
-from . import invert, render, io_util, tables, calibrate as calibmod
+from . import calibrate as calibmod
+from . import invert, render, tables
 
 
 def process_negative(
@@ -31,6 +36,15 @@ def process_negative(
     """
     if crop:
         img_linear, bbox = invert.crop_to_film(img_linear)
+
+    # A fitted calibration is only valid in the density normalization used to
+    # create it. Explicit CLI values remain authoritative; otherwise restore
+    # the saved Dmin/Dmax instead of silently re-estimating them for every run.
+    if calib is not None:
+        if dmin is None and "dmin" in calib:
+            dmin = calib["dmin"]
+        if dmax is None and "dmax" in calib:
+            dmax = calib["dmax"]
 
     positive, meta = invert.invert_negative(
         img_linear,
