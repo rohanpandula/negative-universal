@@ -51,6 +51,39 @@ between real and simulated components.
   a separate 208-byte output-info structure.  This is a function-level golden
   vector, not a ScanMain production capture.
 
+## Closed bridge audit (2026-08-17)
+
+There is no shipped vendor-supported bridge that combines mode-2 simulated
+film with the genuine mode-1 ScanMain pipeline:
+
+- `ScanMain`'s `DummyFinescan` at `0x40b7f0` is response bookkeeping.  When the
+  runtime scanner status selects the dummy branch, an outbound `0x3110`
+  fine-scan request is converted locally into a successful `0x7110` response.
+  The 0x4c-byte result carries IDs and status only; it creates no film, PI,
+  image buffer, or correction data.  `DummyScanImagePath` is merely a path
+  setting and does not enable a dummy scanner.
+- `SSDDummyApp` is a compatible manual protocol client, not a scanner peer.  It
+  claims terminal 201 and addresses real ScanMain at terminal 3.  Interface
+  init `0x00820340` is safe when terminal 201 is free, but SearchPI
+  `0x008c0340` and fine-send `0x00a60340` still wait on the missing scanner
+  event and raw-CMM image sequence.  Its automatic CMM allocation contains
+  prefine-profile metadata only, not pixel data.
+- `TestMain.exe` launches individual components; `SimEnv.exe` applies the
+  existing registry/script presets; `ff1394Lab_sim.dll` is printer-side; and
+  the remaining LUKE, presence, and simulator labels do not expose a hidden
+  scanner transport emulator.  Decoding their Japanese labels as CP932 was
+  useful for tracing them, but locale was not the blocker.
+
+The narrowest replacement boundary that retains real ScanMain terminal 3 and
+real nnSystem terminal 9 is `LukeUsbApi.dll`.  `nnSystem_PC.exe` imports only
+five functions from it: `LUKE_USBDpIsTargetStartup`, `LUKE_USBLchOpen`,
+`LUKE_USBLchRead`, `LUKE_USBLchWrite`, and `LUKE_USBLchClose`.  A useful proxy
+must implement the actual read/write exchange; forcing `IsTargetStartup` or a
+connected B062 state merely passes initialization while Luke reads continue to
+fail.  Capture the mode-2 exchange in isolation to recover that contract, and
+never run mode-2 SsSim concurrently with mode-1 ScanMain because both claim
+scanner/nnSystem identities 3 and 9.
+
 ## What is simulated, layer by layer
 
 | Layer | Real component | Simulator | Switch |
