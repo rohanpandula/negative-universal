@@ -2,23 +2,61 @@
 
 ## Summary
 
-The MS11W7-SP500 installer ships Fujifilm's own simulation layer at every
-process boundary of the scanner stack: transport, device, order database, GUI,
-and frame-detection telemetry. The image pipeline itself is never simulated.
-A Windows 7 VM can therefore run the genuine MS11 negative-conversion pipeline
-with no SP-500 attached, which makes a golden-master comparison against this
-project's pipeline practical.
+The MS11W7-SP500 installer ships Fujifilm simulation components for transport,
+device, order database, GUI, and frame-detection telemetry.  Runtime work has
+now established an important boundary: the stock full-simulation topology
+replaces the real scanner and nnSystem terminals and deliberately omits
+`ScanMain.exe`.  The shipped assets are therefore a strong test bench, but they
+do not by themselves prove that the complete genuine ScanMain negative pipeline
+runs without hardware.
 
-This is a supported vendor configuration, not a hack. The installer carries
-explicit toggle scripts that switch each subsystem between real and simulated
-components.
+The full-simulation topology is a supported vendor configuration.  Hybridizing
+it with real ScanMain is not: doing so creates duplicate IPC owners.  The
+installer carries explicit toggle scripts that switch many other subsystems
+between real and simulated components.
+
+## Runtime corrections and verified topology (2026-08-17)
+
+- EZmain's first argument selects topology: `0` = real input/output, `1` = real
+  input with simulated output, `2` = simulated input/output.  The second
+  argument controls operator-SS startup.  No arguments defaults to `2 1`.
+- EZmain owns startup.  It creates the common-memory server and launches SsSim,
+  ScanMain, storage, sequence, and operator children in the required order.  Do
+  not prelaunch SsSim, ScanMain, or StgManStart.
+- In mode 2, SsSim creates simulated scanner and nnSystem endpoints (IPC
+  identities 3 and 9); EZmain intentionally skips real ScanMain.  Patching the
+  mode check to start ScanMain as well creates duplicate identities and is not
+  a valid harness topology.
+- In mode 1, real ScanMain and nnSystem start, while SsSim supplies only the
+  simulated printer side.  Registry scanner-presence values do not remove the
+  Luke runtime connection-state gate in this topology.  SsSim's INI and
+  FilmLoad handlers both require its scanner object; in mode 1 the INI action
+  reports that reading preparation is not ready, and FilmLoad cannot be used
+  to feed the real ScanMain graph.
+- `DeviceStateCheck.exe` is not an installer presence gate.  Its absent-device
+  path succeeds; when a matching `USB\VID_04CB&PID_6121` entry exists it removes
+  only a failed-install device state.  QEMU USB descriptor spoofing is not
+  required for installation.
+- A reversible diagnostic changed nnSystem's failed-read B062 advertisement
+  from state 0 to state 1.  This allowed real ScanMain to initialize masks and
+  bind scanner storage unit handle 80, but Luke reads continued to return
+  `0x21200004`.  It was a status-gate experiment, not USB or scanner emulation;
+  the original executable was restored and hash-verified afterward.
+- The English installer and `Message\US` catalogs target `0x0409`.  Keep the VM
+  `en-US` / ACP 1252 and decode Fujifilm's narrow Japanese trace strings offline
+  as CP932.  Switching the Windows system code page is not a prerequisite.
+- An isolated native call of installed `ExpCorrUtil.dll!_PreFineUtil@152`
+  against shipped `prescanimg.raw` returned success and matched independent
+  emulation exactly.  It produces a 6,144-byte LUT (three 0x800-byte banks) and
+  a separate 208-byte output-info structure.  This is a function-level golden
+  vector, not a ScanMain production capture.
 
 ## What is simulated, layer by layer
 
 | Layer | Real component | Simulator | Switch |
 | --- | --- | --- | --- |
 | 1394 transport | `ff1394Lab.dll` (system32) | `ff1394Lab_sim.dll` | `TOOL\1394sim.bat` / `1394real.bat` copy one over the other |
-| Scanner + printer behavior | SP-500 hardware | `SsSim.exe` ("SsSim - Ix Simulation") | run standalone |
+| Scanner + printer behavior | SP-500 hardware | `SsSim.exe` ("SsSim - Ix Simulation") | launched by EZmain in mode 2; do not prelaunch in the managed graph |
 | Film magazine | physical magazine | `SimIxMag.dll`, reads `IxMag%03d.dat` | linked by SsSim |
 | Order database client | `FDiaClient*.dll` | `FdiaDmy*.DLL` (four variants) | `SET_FDI_DUMMY.CMD` / `DEL_FDI_DUMMY.CMD` |
 | GUI server | `VirGUI.dll` | `VirGUIDmy.dll` | `SET_VirGUI_DUMMY.CMD` / `DEL_VirGUI_DUMMY.CMD` |
@@ -48,8 +86,9 @@ system in `Frontier\Setup` (113 `.reg` toggles) plus mode packages in `TOOL`:
 
 - **Scanner presence**: `FilmScannerExist.REG` / `FilmScannerNotExist.REG`
   set `HKLM\SOFTWARE\FUJIFILM\Frontier\CurrentVersion\System\InputUnit`
-  `FilmScanner_1/2 = 1/0`. The runtime trusts this key; software-level
-  scanner presence does not require the USB device after install.
+  `FilmScanner_1/2 = 1/0`. These values select input topology, but a mode-1
+  real-ScanMain path still requires the Luke connection-state/protocol chain;
+  the registry value alone does not emulate the scanner.
 - **Printer presence and model**: `PrinterExist.reg` /
   `PrinterNotExist.reg`, model selectors (`Printer_LP1500.reg`,
   `Printer_LP3000.reg`, `Printer_LPKariba.reg`, `SysInfoPrinter*.reg`), and
@@ -75,18 +114,20 @@ system in `Frontier\Setup` (113 `.reg` toggles) plus mode packages in `TOOL`:
   place (FDIA clients, OMA, PU800/PU8Ctrl printers, VirGUI, CD-R AC,
   DummyAC/F25, MT, PTOP, DNA dummy environment rebuild).
 
-Practical consequence for the harness: after a base install, the no-hardware
-configuration is assembled from registry toggles (scanner/printer presence,
-mode) plus dummy swaps — all scriptable, no hardware required at any point
-after the installer's USB gate.
+Practical consequence for the harness: after a base install, the vendor mode-2
+no-hardware configuration is assembled from registry toggles plus dummy swaps.
+Running the real ScanMain path remains a separate protocol problem; it cannot
+be solved merely by combining mode-2 SsSim with mode-1 children.
 
 ## How "film" is represented
 
 Film is never physically modeled. Three separate mechanisms stand in for it:
 
-1. **Geometry and state.** `test_film.ini` (read from the SsSim working
-   directory) describes the strip physically: `FilmStartPos`, `FilmEndPos`,
-   `FilmLength`, `FrameCount`, `minFrameNo`, `TotalFrameCnt`.
+1. **Geometry and state.** `test_film.ini` describes the strip physically:
+   `FilmStartPos`, `FilmEndPos`, `FilmLength`, `FrameCount`, `minFrameNo`,
+   `TotalFrameCnt`.  SsSim stores `.\test_film.ini` as a default path but does
+   not parse it automatically; its INI action selects and parses the file when
+   the mode-2 scanner simulator exists.
 2. **Detection telemetry.** `InitData\FilmSim.ini` rewrites the output of the
    frame-detection module. Its header states the purpose: simulate situations
    that are difficult to reproduce on the real machine. It is enabled by
@@ -117,8 +158,9 @@ the entire contract:
 
 - **Prescan raw** (`Tool\SsSim_InitData\prescanimg.raw`, 477,392 bytes):
   - 32-byte header: magic `44 52 02 01` ("DR"), u32 header size = 32, u16
-    width = 340, u16 height = 234, u32 roll frame count = 6, reserved zeros,
-    `IM16` marker at offset 0x18.
+    width = 340, u16 height = 234, u32 value = 6 (consistent with the payload's
+    six bytes per RGB-u16 pixel; the vendor field label is not yet proven),
+    reserved zeros, `IM16` marker at offset 0x18.
   - Payload is exactly `width * height * 3 * 2` bytes: three interleaved
     channels, 16-bit little-endian, corresponding to the three sequential
     mono exposures. Observed sample range 0–1150, i.e. 12-bit sensor data in
@@ -140,7 +182,7 @@ the entire contract:
 
 ## Harness plan for this project
 
-1. Run MS11 in a Windows 7 VM with its own simulator components. Record which
+1. Run MS11 in a Windows VM with its own simulator components. Record which
    modules the no-hardware configuration actually loads, and the fine-scan
    raw layout, on first run.
 2. Feed owned sequential-RGB captures through the input contract: register the
@@ -171,8 +213,11 @@ the entire contract:
   per-stock work remains this project's own.
 - The dummy clients are export subsets; expect a working no-hardware
   configuration to mix real and stub modules.
-- The no-scanner install layout and the fine-scan header are unverified until
-  the VM run.
+- The fine-scan raw header and a genuine operator-driven ScanMain capture remain
+  unverified.  The current VM uses the scanner-present registry topology.
+- `NEGA_BUNKO.BIN` and `POSI_BUNKO.BIN` are not installer payloads and are
+  absent from the current VM.  Static code expects 908-byte scanner-side
+  calibration blobs; dummy data must not be presented as calibration evidence.
 
 ## Provenance
 
