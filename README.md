@@ -35,7 +35,7 @@ LUT that makes your device render like the reference.
 
 | Project | Accuracy | What it does |
 |---|---|---|
-| **noritsu-tool** | ~94% NCC on LS-600 raw | Density inversion + Noritsu tone curves from actual DLL tables |
+| **noritsu-tool** | CLI: ~94% NCC on LS-600 raw; exact-replay audit: byte-identical to the engine's own output (MAE 0.0) and 0.936–0.999 NCC vs machine TIFFs across 35 frames | Density inversion + Noritsu tone curves from actual DLL tables; a 38-stage evidence-labelled replay of the installer pipeline |
 | **cool-colors** | 99.1% of Nikon Coolscan color | Recovered Nikon Scan's full color pipeline (Nikon-specific) |
 | **flexcolor-tool** | engine math recovered | Hasselblad FlexColor LUTs, gradation curves, neg-gamma |
 | **digital-fauxice** | byte-for-byte exact | Nikon's Digital ICE reimplemented from scratch |
