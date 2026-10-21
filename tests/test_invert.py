@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import tempfile
 import unittest
@@ -334,6 +336,24 @@ class CliTests(unittest.TestCase):
         (directory / "manifest.json").write_text(json.dumps({"kind": "film"}))
         with self.assertRaises(NegativeUniversalError):
             invert_triplets(normalized=directory, output=self.root / "positive")
+
+    def test_probe_reports_base_without_writing(self) -> None:
+        capture = write_capture(self.root, "frame")
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            main(["probe", "--normalized", str(capture)])
+        report = json.loads(stdout.getvalue())
+        self.assertEqual(report["base"]["source"], "border")
+        self.assertAlmostEqual(report["base"]["transmittance"][0], 40000 / 65535, delta=0.01)
+        self.assertGreater(report["candidates"], len(report["chosen"]))
+        self.assertIn("spread_density", report["base"])
+
+    def test_probe_accepts_roi(self) -> None:
+        capture = write_capture(self.root, "frame")
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            main(["probe", "--normalized", str(capture), "--base-roi", "8,8,10,10"])
+        self.assertEqual(json.loads(stdout.getvalue())["base"]["source"], "roi")
 
     def test_cli_exit_code_on_error(self) -> None:
         with self.assertRaises(SystemExit) as raised:

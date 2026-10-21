@@ -88,3 +88,14 @@ token survives only if that delete is stubbed.
 transcription of the core. This repo's `src/negative_universal/invert.py`
 implements the density version of the same renderer, and
 `src/negative_universal/probe.py` the base probe.
+
+## Probing caveats seen on real frames
+
+The border ring on a tightly cropped strip is not always bare film. On
+`native_owner_unrotated_negative_control.tif` the bottom edge is strip shadow
+(density ~1.1) while the left and right edges carry light-box glow *brighter*
+than the film base. The brightest-decile target plus the half-brightness
+rejection keeps the glow and drops the shadow, so the base lands on the glow
+side — a few hundredths of a decade hot, which auto-range absorbs and a fixed
+look does not. `negative-universal probe --normalized <capture>` prints the
+chosen boxes and `spread_density` so this is visible before rendering.

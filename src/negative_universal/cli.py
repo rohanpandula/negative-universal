@@ -1233,6 +1233,48 @@ def invert_triplets(
           f"{estimate.base[1]:.4f}/{estimate.base[2]:.4f} from {estimate.source}")
 
 
+def probe_capture(
+    *,
+    normalized: Path,
+    base_roi: tuple[int, int, int, int] | None = None,
+) -> None:
+    """Report the base a frame would be inverted with, without rendering."""
+    _, images = _load_normalized(normalized)
+    try:
+        estimate = probe.probe_base(images, roi=base_roi)
+    except probe.ProbeError as error:
+        raise NegativeUniversalError(str(error)) from error
+
+    report = {
+        "base": {
+            "source": estimate.source,
+            "transmittance": [round(value, 6) for value in estimate.base],
+            "density": [
+                round(-math.log10(min(value, 1.0)), 4) for value in estimate.base
+            ],
+            "plane": [
+                [round(coefficient, 4) for coefficient in axis]
+                for axis in estimate.plane
+            ],
+        },
+        "candidates": len(estimate.patches),
+        "chosen": [
+            dict(_patch_record(patch), luma=round(patch.luma, 4), chroma=round(patch.chroma, 4))
+            for patch in estimate.chosen
+        ],
+        "rejected": len(estimate.patches) - len(estimate.chosen),
+    }
+    brightest, darkest = estimate.base.index(max(estimate.base)), estimate.base.index(
+        min(estimate.base)
+    )
+    spread = abs(
+        -math.log10(max(estimate.base[brightest], 1e-4))
+        + math.log10(max(estimate.base[darkest], 1e-4))
+    )
+    report["base"]["spread_density"] = round(spread, 4)
+    print(json.dumps(report, indent=2))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="negative-universal")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1304,6 +1346,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     invert_parser.add_argument("--neutral-pull", type=float, default=0.0)
     invert_parser.add_argument("--output", type=Path, required=True)
+
+    probe_parser = subparsers.add_parser(
+        "probe", help="report the clear-film base a frame would be inverted with"
+    )
+    probe_parser.add_argument("--normalized", type=Path, required=True)
+    probe_parser.add_argument("--base-roi", type=_roi_argument)
     return parser
 
 
@@ -1326,6 +1374,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 flat=args.flat,
                 output=args.output,
             )
+        elif args.command == "probe":
+            probe_capture(normalized=args.normalized, base_roi=args.base_roi)
         elif args.command == "invert":
             invert_triplets(
                 normalized=args.normalized,

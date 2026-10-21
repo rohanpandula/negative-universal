@@ -147,18 +147,25 @@ def border_candidates(
 
 
 def _fit_plane(samples: Sequence[tuple[float, float, float, float]]) -> tuple[float, float, float]:
-    """Least-squares `a + b*u + c*v` with normalised coordinates, mean 1.0."""
+    """Weighted least squares `a + b*u + c*v`, normalised coordinates, mean 1.0.
+
+    Each sample is `(u, v, value, weight)`; quiet patches carry more of the
+    fit than noisy ones.
+    """
     if len(samples) < 3:
         return (1.0, 0.0, 0.0)
-    count = len(samples)
-    su = sum(sample[0] for sample in samples)
-    sv = sum(sample[1] for sample in samples)
-    suu = sum(sample[0] * sample[0] for sample in samples)
-    svv = sum(sample[1] * sample[1] for sample in samples)
-    suv = sum(sample[0] * sample[1] for sample in samples)
-    sy = sum(sample[2] for sample in samples)
-    suy = sum(sample[0] * sample[2] for sample in samples)
-    svy = sum(sample[1] * sample[2] for sample in samples)
+    weighted = [
+        (u, v, value, weight, value * weight) for u, v, value, weight in samples
+    ]
+    count = sum(sample[3] for sample in weighted)
+    su = sum(sample[0] * sample[3] for sample in weighted)
+    sv = sum(sample[1] * sample[3] for sample in weighted)
+    suu = sum(sample[0] * sample[0] * sample[3] for sample in weighted)
+    svv = sum(sample[1] * sample[1] * sample[3] for sample in weighted)
+    suv = sum(sample[0] * sample[1] * sample[3] for sample in weighted)
+    sy = sum(sample[4] for sample in weighted)
+    suy = sum(sample[0] * sample[4] for sample in weighted)
+    svy = sum(sample[1] * sample[4] for sample in weighted)
     # normal equations, solved by Cramer's rule; fall back to flat on a
     # degenerate (collinear) layout
     matrix = [[count, su, sv], [su, suu, suv], [sv, suv, svv]]
@@ -188,7 +195,10 @@ def _fit_plane(samples: Sequence[tuple[float, float, float, float]]) -> tuple[fl
     centre = offset  # u = v = 0 at the frame centre
     if centre <= 1e-6:
         return (1.0, 0.0, 0.0)
-    return (1.0, x_slope / centre, y_slope / centre)
+    # a real gate never falls off by more than about half across the frame;
+    # anything beyond this is a bad patch, not illumination
+    clamp = lambda value: min(max(value, -0.5), 0.5)
+    return (1.0, clamp(x_slope / centre), clamp(y_slope / centre))
 
 
 def _side(patch: Patch, width: int, height: int) -> str:
@@ -204,7 +214,7 @@ def _side(patch: Patch, width: int, height: int) -> str:
 def probe_base(
     image: Mapping[str, object],
     *,
-    keep: int = 5,
+    keep: int = 12,
     band_fraction: float = 0.02,
     roi: tuple[int, int, int, int] | None = None,
 ) -> BaseEstimate:
@@ -225,13 +235,19 @@ def probe_base(
         chosen = tuple(patches)
     else:
         patches = border_candidates(image, band_fraction=band_fraction)
-        usable = [patch for patch in patches if patch.luma >= _MIN_LUMA]
-        if not usable:
+        lumas = sorted(patch.luma for patch in patches if patch.luma >= _MIN_LUMA)
+        if not lumas:
             raise ProbeError(
                 "no clear-film patch on the border; pass an explicit base ROI"
             )
-        lumas = sorted(patch.luma for patch in usable)
-        target = lumas[min(len(lumas) - 1, int(len(lumas) * 0.9))]
+        reference_luma = lumas[min(len(lumas) - 1, int(len(lumas) * 0.9))]
+        # a patch less than half as bright as the brightest decile is picture
+        # content in the border ring, not bare film
+        usable = [
+            patch
+            for patch in patches
+            if patch.luma >= max(_MIN_LUMA, reference_luma * 0.5)
+        ]
         frame_width = image["R"].width  # type: ignore[attr-defined]
         frame_height = image["R"].height  # type: ignore[attr-defined]
         # One or two winners per side: a base picked only from the top edge
@@ -242,13 +258,14 @@ def probe_base(
             buckets[_side(patch, frame_width, frame_height)].append(patch)
         chosen_patches: list[Patch] = []
         for side in ("top", "bottom", "left", "right"):
-            ranked = sorted(buckets[side], key=lambda patch: patch.cost(target))
+            ranked = sorted(buckets[side], key=lambda patch: patch.cost(reference_luma))
             chosen_patches.extend(ranked[:per_side])
         chosen = tuple(chosen_patches)
 
     frame_width = image["R"].width  # type: ignore[attr-defined]
     frame_height = image["R"].height  # type: ignore[attr-defined]
     base = base_from_patches(chosen)
+    target = median(patch.luma for patch in chosen)
     if min(base) <= 0.0:
         raise ProbeError("clear-film base is black")
     samples = [
@@ -256,6 +273,7 @@ def probe_base(
             (patch.x + patch.width / 2) / frame_width * 2.0 - 1.0,
             (patch.y + patch.height / 2) / frame_height * 2.0 - 1.0,
             patch.medians[channel] / base[channel],
+            1.0 / (1.0 + patch.cost(target)),
         )
         for patch in chosen
         for channel in range(3)
