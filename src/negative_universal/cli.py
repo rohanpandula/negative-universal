@@ -18,6 +18,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Iterator, Sequence
 
+from . import invert, probe
+
 
 CHANNELS = ("R", "G", "B")
 SENSOR_LAYOUTS = frozenset({"mono", "rggb", "bggr", "grbg", "gbrg"})
@@ -71,6 +73,16 @@ def _roi_argument(value: str) -> tuple[int, int, int, int]:
         raise argparse.ArgumentTypeError("ROI must be x,y,width,height") from error
     if len(parts) != 4:
         raise argparse.ArgumentTypeError("ROI must be x,y,width,height")
+    return parts
+
+
+def _triplet_argument(value: str) -> tuple[float, float, float]:
+    try:
+        parts = tuple(float(part) for part in value.split(","))
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("expected R,G,B floats") from error
+    if len(parts) != 3:
+        raise argparse.ArgumentTypeError("expected R,G,B floats")
     return parts
 
 
@@ -1004,6 +1016,223 @@ def normalize_triplets(*, film: Path, dark: Path, flat: Path, output: Path) -> N
         )
 
 
+def _load_normalized(directory: Path) -> tuple[dict[str, Any], dict[str, PgmImage]]:
+    """Load a `normalized_transmittance` capture, verifying hashes and geometry."""
+    manifest_path = directory / MANIFEST_NAME
+    if not manifest_path.is_file():
+        raise NegativeUniversalError(f"no {MANIFEST_NAME} in {directory}")
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise NegativeUniversalError(f"unreadable manifest in {directory}") from error
+    if payload.get("kind") != "normalized_transmittance":
+        raise NegativeUniversalError(
+            f"{directory} holds {payload.get('kind')!r}, not 'normalized_transmittance'"
+        )
+    frames = payload.get("frames")
+    if not isinstance(frames, dict):
+        raise NegativeUniversalError("normalized manifest has no frames")
+    images: dict[str, PgmImage] = {}
+    for channel in CHANNELS:
+        record = frames.get(channel)
+        if not isinstance(record, dict):
+            raise NegativeUniversalError(f"normalized manifest is missing {channel}")
+        path = directory / str(record.get("file", ""))
+        if not path.is_file():
+            raise NegativeUniversalError(f"missing {channel} frame: {path.name}")
+        if sha256_file(path) != record.get("sha256"):
+            raise NegativeUniversalError(f"{channel} frame hash does not match")
+        image = read_pgm(path)
+        if (image.width, image.height) != (record.get("width"), record.get("height")):
+            raise NegativeUniversalError(f"{channel} frame size disagrees with manifest")
+        if image.max_value != 65535:
+            raise NegativeUniversalError(
+                f"{channel} frame is not 16-bit transmittance"
+            )
+        images[channel] = image
+    reference = images["R"]
+    for channel in CHANNELS[1:]:
+        if (images[channel].width, images[channel].height) != (
+            reference.width,
+            reference.height,
+        ):
+            raise NegativeUniversalError("triplet frames differ in size")
+    return payload, images
+
+
+def _patch_record(patch: probe.Patch) -> dict[str, Any]:
+    return {
+        "x": patch.x,
+        "y": patch.y,
+        "width": patch.width,
+        "height": patch.height,
+        "transmittance": [round(value, 6) for value in patch.medians],
+    }
+
+
+def invert_triplets(
+    *,
+    normalized: Path,
+    output: Path,
+    clear_base: Path | None = None,
+    base_roi: tuple[int, int, int, int] | None = None,
+    density_offset: float = 0.0,
+    gray: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    contrast: float = 0.5,
+    toe: float = 0.06,
+    white_density: float = 0.05,
+    black_density: float = 1.7,
+    neutral_pull: float = 0.0,
+    auto_range: bool = False,
+) -> None:
+    """Invert a normalized triplet through measured density into a positive."""
+    if clear_base is not None and base_roi is not None:
+        raise NegativeUniversalError("pass either --clear-base or --base-roi, not both")
+    if not -2.0 <= density_offset <= 2.0:
+        raise NegativeUniversalError("--density-offset must be in -2..2 decades")
+    if not 0.0 <= contrast <= 1.0:
+        raise NegativeUniversalError("--contrast must be in 0..1")
+    if clear_base is None and base_roi is None and not normalized.is_dir():
+        raise NegativeUniversalError(f"not a directory: {normalized}")
+
+    manifest, images = _load_normalized(normalized)
+    base_manifest: dict[str, Any] | None = None
+    try:
+        if clear_base is not None:
+            base_manifest, base_images = _load_normalized(clear_base)
+            if base_images["R"].width != images["R"].width or (
+                base_images["R"].height != images["R"].height
+            ):
+                raise NegativeUniversalError(
+                    "clear-base capture must match the frame geometry"
+                )
+            estimate = probe.probe_base(base_images, band_fraction=0.05)
+        elif base_roi is not None:
+            estimate = probe.probe_base(images, roi=base_roi)
+        else:
+            estimate = probe.probe_base(images)
+
+        if auto_range:
+            resolved = invert.sample_densities(images, estimate)
+            white_density, black_density = invert.auto_range(resolved)
+            print(
+                "auto range: "
+                f"white {white_density:.3f}, black {black_density:.3f} decades"
+            )
+
+        params = invert.RenderParams(
+            look=invert.LookParams(
+                contrast=contrast,
+                toe=toe,
+                white_density=white_density,
+                black_density=black_density,
+            ),
+            density_offset=density_offset,
+            gray=gray,
+            neutral_pull=neutral_pull,
+        )
+        rendered, stats = invert.render(images, estimate, params)
+    except (probe.ProbeError, invert.InvertError) as error:
+        raise NegativeUniversalError(str(error)) from error
+
+    base_luma = sum(
+        value * weight for value, weight in zip(estimate.base, invert.LUMA, strict=True)
+    )
+    created_at = datetime.now(UTC).isoformat()
+    with _staged_output(output) as staging:
+        frame_records: dict[str, Any] = {}
+        for channel in CHANNELS:
+            path = staging / f"positive_{channel}.pgm"
+            write_pgm(
+                path,
+                PgmImage(
+                    images[channel].width,
+                    images[channel].height,
+                    65535,
+                    rendered[channel],
+                ),
+            )
+            frame_records[channel] = {
+                "file": path.name,
+                "width": images[channel].width,
+                "height": images[channel].height,
+                "max_value": 65535,
+                "sha256": sha256_file(path),
+            }
+        invert.write_ppm(
+            staging / "positive.ppm",
+            rendered,
+            images["R"].width,
+            images["R"].height,
+        )
+        payload: dict[str, Any] = {
+            "schema": 1,
+            "kind": "positive_render",
+            "created_at": created_at,
+            "channel_order": list(CHANNELS),
+            "sensor_layout": manifest.get("rig_metadata", {}).get("sensor_layout"),
+            "width": images["R"].width,
+            "height": images["R"].height,
+            "output_max_value": 65535,
+            "output_encoding": "srgb",
+            "formula": {
+                "domain": "optical density, -log10(transmittance)",
+                "density": "d = -log10(clamp(T / base_plane(x, y), 1e-4, 1))",
+                "correction": "d + gray[channel] + density_offset",
+                "look": (
+                    "monotone LUT over 0..4 decades, "
+                    f"white={white_density}, black={black_density}, "
+                    f"contrast={contrast}, toe={toe}"
+                ),
+            },
+            "base": {
+                "source": estimate.source,
+                "observed_patches": len(estimate.patches),
+                "transmittance": [round(value, 6) for value in estimate.base],
+                "density": [round(-math.log10(min(value, 1.0)), 6) for value in estimate.base],
+                "luma": round(base_luma, 6),
+                "plane": [
+                    [round(coefficient, 6) for coefficient in axis]
+                    for axis in estimate.plane
+                ],
+                "chosen": [_patch_record(patch) for patch in estimate.chosen],
+            },
+            "correction": {
+                "density_offset": density_offset,
+                "gray": list(gray),
+                "neutral_pull": neutral_pull,
+            },
+            "look": {
+                "contrast": contrast,
+                "toe": toe,
+                "white_density": round(white_density, 4),
+                "black_density": round(black_density, 4),
+                "auto_range": auto_range,
+            },
+            "stats": {
+                "pixels": stats.pixels,
+                "clipped_transmittance": stats.clipped_transmittance,
+                "density_min": round(stats.density_floor, 4),
+                "density_max": round(stats.density_ceiling, 4),
+            },
+            "sources": {
+                "normalized_dir": str(normalized),
+                "normalized_manifest_sha256": sha256_file(normalized / MANIFEST_NAME),
+            },
+            "frames": frame_records,
+        }
+        if clear_base is not None and base_manifest is not None:
+            payload["sources"]["clear_base_dir"] = str(clear_base)
+            payload["sources"]["clear_base_manifest_sha256"] = sha256_file(
+                clear_base / MANIFEST_NAME
+            )
+        (staging / MANIFEST_NAME).write_text(
+            json.dumps(payload, indent=2) + "\n", encoding="utf-8"
+        )
+    print(f"rendered {stats.pixels} px, base {estimate.base[0]:.4f}/"
+          f"{estimate.base[1]:.4f}/{estimate.base[2]:.4f} from {estimate.source}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="negative-universal")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1046,6 +1275,35 @@ def build_parser() -> argparse.ArgumentParser:
     calibrate.add_argument("--target-base-fraction", type=float, required=True)
     calibrate.add_argument("--flat-ceiling-fraction", type=float, required=True)
     calibrate.add_argument("--output", type=Path, required=True)
+
+    invert_parser = subparsers.add_parser(
+        "invert",
+        help="invert a normalized triplet through measured density",
+    )
+    invert_parser.add_argument("--normalized", type=Path, required=True)
+    invert_parser.add_argument(
+        "--clear-base",
+        type=Path,
+        help="normalized clear-film capture to measure the base from",
+    )
+    invert_parser.add_argument(
+        "--base-roi",
+        type=_roi_argument,
+        help="explicit base patch for frames without a border",
+    )
+    invert_parser.add_argument("--density-offset", type=float, default=0.0)
+    invert_parser.add_argument("--gray", type=_triplet_argument, default=(0.0, 0.0, 0.0))
+    invert_parser.add_argument("--contrast", type=float, default=0.5)
+    invert_parser.add_argument("--toe", type=float, default=0.06)
+    invert_parser.add_argument("--white-density", type=float, default=0.05)
+    invert_parser.add_argument("--black-density", type=float, default=1.7)
+    invert_parser.add_argument(
+        "--auto-range",
+        action="store_true",
+        help="fit white/black to this frame's density percentiles",
+    )
+    invert_parser.add_argument("--neutral-pull", type=float, default=0.0)
+    invert_parser.add_argument("--output", type=Path, required=True)
     return parser
 
 
@@ -1067,6 +1325,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                 dark=args.dark,
                 flat=args.flat,
                 output=args.output,
+            )
+        elif args.command == "invert":
+            invert_triplets(
+                normalized=args.normalized,
+                output=args.output,
+                clear_base=args.clear_base,
+                base_roi=args.base_roi,
+                density_offset=args.density_offset,
+                gray=args.gray,
+                contrast=args.contrast,
+                toe=args.toe,
+                white_density=args.white_density,
+                black_density=args.black_density,
+                neutral_pull=args.neutral_pull,
+                auto_range=args.auto_range,
             )
         elif args.command == "decode-raw":
             from .raw_decode import RawDecodeError, decode_raw
